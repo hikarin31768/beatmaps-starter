@@ -68,8 +68,46 @@ bash "$sources/FFmpeg-n7.1.5/configure" \
 "$make_command" -r -j "${NUMBER_OF_PROCESSORS:-4}" ffmpeg.exe ffprobe.exe
 
 ffmpeg="$work/ffmpeg-build/ffmpeg.exe"
+smoke_wav="$work/smoke.wav"
+sample_rate=44100
+channels=2
+bits_per_sample=16
+smoke_data_size=$((sample_rate * channels * bits_per_sample / 8))
+
+write_le16() {
+  local value="$1" low high
+  printf -v low '%02x' "$((value & 0xff))"
+  printf -v high '%02x' "$(((value >> 8) & 0xff))"
+  printf '%b' "\\x${low}\\x${high}"
+}
+
+write_le32() {
+  local value="$1" byte0 byte1 byte2 byte3
+  printf -v byte0 '%02x' "$((value & 0xff))"
+  printf -v byte1 '%02x' "$(((value >> 8) & 0xff))"
+  printf -v byte2 '%02x' "$(((value >> 16) & 0xff))"
+  printf -v byte3 '%02x' "$(((value >> 24) & 0xff))"
+  printf '%b' "\\x${byte0}\\x${byte1}\\x${byte2}\\x${byte3}"
+}
+
+{
+  printf 'RIFF'
+  write_le32 $((36 + smoke_data_size))
+  printf 'WAVEfmt '
+  write_le32 16
+  write_le16 1
+  write_le16 "$channels"
+  write_le32 "$sample_rate"
+  write_le32 $((sample_rate * channels * bits_per_sample / 8))
+  write_le16 $((channels * bits_per_sample / 8))
+  write_le16 "$bits_per_sample"
+  printf 'data'
+  write_le32 "$smoke_data_size"
+} > "$smoke_wav"
+dd if=/dev/zero bs="$smoke_data_size" count=1 status=none >> "$smoke_wav"
+
 "$ffmpeg" -v error -nostdin -y \
-  -i "$root/map_example/CustomWIPLevels/example_v4/song.ogg" -t 1 -vn \
+  -i "$smoke_wav" -t 1 -vn \
   -af ebur128=framelog=verbose -ar 44100 -ac 2 -c:a libvorbis "$work/smoke.ogg"
 
 mkdir -p "$runtime/licenses"
