@@ -44,7 +44,8 @@ for library in libogg-1.3.6 libvorbis-1.3.7; do
   cmake -S "$sources/$library" -B "$work/$library-build" -G Ninja \
     -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
     -DBUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX="$prefix_windows" \
-    -DCMAKE_PREFIX_PATH="$prefix_windows" '-DCMAKE_C_FLAGS_RELEASE=-Os -DNDEBUG'
+    -DCMAKE_PREFIX_PATH="$prefix_windows" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    '-DCMAKE_C_FLAGS_RELEASE=-Os -DNDEBUG'
   cmake --build "$work/$library-build" --target install
 done
 
