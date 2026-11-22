@@ -180,7 +180,7 @@ pub async fn resolve_media(
     state: tauri::State<'_, State>,
 ) -> Result<MediaView> {
     let mut draft = state.draft.lock().await;
-    emit_progress(&app, "resolve", "正在获取歌曲信息与可用音质");
+    emit_progress(&app, "resolve", "正在获取歌曲信息");
     let metadata = platform::resolve(&state, &url).await?;
     let cover = match remote_cover(&state, &metadata).await {
         Ok(cover) => cover,
