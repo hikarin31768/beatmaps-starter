@@ -1,0 +1,34 @@
+{
+  "version" : "4.0.1",
+  "song" : {
+    "title" : "example_v4",
+    "subTitle" : "sub_title",
+    "author" : "artist"
+  },
+  "audio" : {
+    "songFilename" : "song.ogg",
+    "songDuration" : 0,
+    "audioDataFilename" : "AudioData.dat",
+    "bpm" : 100,
+    "lufs" : 0,
+    "previewStartTime" : 12,
+    "previewDuration" : 10
+  },
+  "songPreviewFilename" : "song.ogg",
+  "coverImageFilename" : "cover.png",
+  "environmentNames" : [
+    "DefaultEnvironment"
+  ],
+  "colorSchemes" : [
+  ],
+  "difficultyBeatmaps" : [
+  ],
+  "customData" : {
+    "editors" : {
+      "lastEditedBy" : "BeatmapsStarter",
+      "BeatmapsStarter" : {
+        "version" : "0.1"
+      }
+    }
+  }
+}
