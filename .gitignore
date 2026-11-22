@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.npm-cache/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/.dev-data/
+src-tauri/.dev-data/
+src-tauri/runtime/*
+!src-tauri/runtime/package.json
+!src-tauri/runtime/package-lock.json
+!src-tauri/runtime/netease.cjs

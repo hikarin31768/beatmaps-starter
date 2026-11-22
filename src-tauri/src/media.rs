@@ -1,0 +1,1049 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
+use image::{codecs::jpeg::JpegEncoder, ImageReader, Limits};
+use ogg::PacketReader;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{
+    fs,
+    io::Cursor,
+    path::{Path, PathBuf},
+};
+use tauri::{AppHandle, Manager};
+use tempfile::TempDir;
+use uuid::Uuid;
+
+use crate::{
+    discovery, emit_progress,
+    platform::{self, Metadata, Quality},
+    state::{issue, MapVersion, Platform, Result, State},
+    tempo, tools,
+};
+
+const COVER_LIMIT: u64 = 20 * 1024 * 1024;
+const COVER_BYTES: usize = 1_500_000;
+const COVER_FILE: &str = "cover.jpg";
+const SONG_BYTES: u64 = 10_000_000;
+const PREVIEW_SECONDS: f64 = 10.0;
+const DEFAULT_COVER: &[u8] = include_bytes!("../icons/icon.png");
+const LEGACY_TEMPLATE: &str =
+    include_str!("../../map_example/CustomWIPLevels/example_v2v3/Info.dat");
+const V4_TEMPLATE: &str = include_str!("../../map_example/CustomWIPLevels/example_v4/Info.dat");
+
+pub struct Draft {
+    id: String,
+    metadata: Metadata,
+    cover: Vec<u8>,
+    cached_file: Option<(String, TempDir)>,
+    lowest_file: Option<(String, TempDir)>,
+    preview_clip: Option<(f64, PreviewClip)>,
+    analysis: Option<tempo::Analysis>,
+}
+
+impl Draft {
+    pub fn platform(&self) -> Platform {
+        self.metadata.source.platform()
+    }
+
+    fn preview(&self) -> PreviewRange {
+        PreviewRange::new(self.metadata.chorus_start, self.metadata.duration)
+    }
+
+    fn shifted_duration(&self, shift: f64) -> Result<f64> {
+        let duration = self.metadata.duration;
+        if !shift.is_finite() || (duration > 0.0 && duration + shift <= 0.0) {
+            return Err("音频偏移超出可调整范围".into());
+        }
+        Ok(if duration > 0.0 {
+            duration + shift
+        } else {
+            0.0
+        })
+    }
+
+    fn selected_preview(&self, preview: Option<PreviewRange>, shift: f64) -> Result<PreviewRange> {
+        preview
+            .unwrap_or_else(|| self.preview())
+            .validate(self.shifted_duration(shift)?)
+    }
+
+    fn lowest_quality(&self) -> Result<String> {
+        self.metadata
+            .qualities
+            .last()
+            .map(|quality| quality.id.clone())
+            .ok_or("没有可用音轨".into())
+    }
+}
+
+struct PreviewClip {
+    dir: TempDir,
+    scope: tauri::scope::fs::Scope,
+}
+
+impl PreviewClip {
+    fn path(&self) -> PathBuf {
+        self.dir.path().join("preview.ogg")
+    }
+}
+
+impl Drop for PreviewClip {
+    fn drop(&mut self) {
+        let _ = self.scope.forbid_file(self.path());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PreviewRange {
+    start: f64,
+    end: f64,
+}
+
+impl PreviewRange {
+    fn new(chorus_start: Option<f64>, duration: f64) -> Self {
+        let limit = if duration > 0.0 {
+            duration
+        } else {
+            f64::INFINITY
+        };
+        let start = chorus_start
+            .filter(|start| *start >= 0.0 && *start < limit)
+            .unwrap_or_default();
+        Self {
+            start,
+            end: (start + PREVIEW_SECONDS).min(limit),
+        }
+    }
+
+    fn within(self, duration: f64) -> Self {
+        if self.start >= duration {
+            return Self::new(None, duration);
+        }
+        Self {
+            end: self.end.min(duration),
+            ..self
+        }
+    }
+
+    fn validate(self, duration: f64) -> Result<Self> {
+        if !self.start.is_finite()
+            || !self.end.is_finite()
+            || self.start < 0.0
+            || self.end <= self.start
+            || (duration > 0.0 && self.start >= duration)
+        {
+            return Err("请选择有效的预览入点和出点".into());
+        }
+        Ok(if duration > 0.0 {
+            self.within(duration)
+        } else {
+            self
+        })
+    }
+
+    fn length(self) -> f64 {
+        self.end - self.start
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaView {
+    id: String,
+    platform: Platform,
+    title: String,
+    artist: String,
+    cover: String,
+    duration: f64,
+    preview: PreviewRange,
+    qualities: Vec<Quality>,
+}
+
+impl From<&Draft> for MediaView {
+    fn from(draft: &Draft) -> Self {
+        let metadata = &draft.metadata;
+        Self {
+            id: draft.id.clone(),
+            platform: draft.platform(),
+            title: metadata.title.clone(),
+            artist: metadata.artist.clone(),
+            cover: cover_data(&draft.cover),
+            duration: metadata.duration,
+            preview: draft.preview(),
+            qualities: metadata.qualities.clone(),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn resolve_media(
+    url: String,
+    app: AppHandle,
+    state: tauri::State<'_, State>,
+) -> Result<MediaView> {
+    let mut draft = state.draft.lock().await;
+    emit_progress(&app, "resolve", "正在获取歌曲信息与可用音质");
+    let metadata = platform::resolve(&state, &url).await?;
+    let cover = match remote_cover(&state, &metadata).await {
+        Ok(cover) => cover,
+        Err(_) => crop_background(DEFAULT_COVER.to_vec()).await?,
+    };
+    let next = Draft {
+        id: Uuid::new_v4().to_string(),
+        metadata,
+        cover,
+        cached_file: None,
+        lowest_file: None,
+        preview_clip: None,
+        analysis: None,
+    };
+    let view = MediaView::from(&next);
+    *draft = Some(next);
+    Ok(view)
+}
+
+async fn remote_cover(state: &State, metadata: &Metadata) -> Result<Vec<u8>> {
+    let url = platform::media_url(&metadata.cover_url)?;
+    let response = state
+        .client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(platform::http_error)?
+        .error_for_status()
+        .map_err(platform::http_error)?;
+    let mut response = response;
+    if response
+        .content_length()
+        .is_some_and(|size| size > COVER_LIMIT)
+    {
+        return Err("封面超过 20 MB".into());
+    }
+    let mut data = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(platform::http_error)? {
+        if data.len() as u64 + chunk.len() as u64 > COVER_LIMIT {
+            return Err("封面超过 20 MB".into());
+        }
+        data.extend_from_slice(&chunk);
+    }
+    crop_background(data).await
+}
+
+#[tauri::command]
+pub async fn replace_cover(
+    id: String,
+    path: String,
+    state: tauri::State<'_, State>,
+) -> Result<String> {
+    let mut guard = state.draft.lock().await;
+    let draft = find_draft(&mut guard, &id)?;
+    let path = Path::new(&path);
+    if !tokio::fs::metadata(path)
+        .await
+        .is_ok_and(|file| file.is_file() && file.len() <= COVER_LIMIT)
+    {
+        return Err("请选择不超过 20 MB 的 JPG、PNG 或 WebP 图片".into());
+    }
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| issue("无法读取封面", e))?;
+    draft.cover = crop_background(bytes).await?;
+    Ok(cover_data(&draft.cover))
+}
+
+async fn crop_background(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    tauri::async_runtime::spawn_blocking(move || crop_cover(&bytes))
+        .await
+        .map_err(|_| "无法处理封面".to_owned())?
+}
+
+fn crop_cover(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| issue("无法识别图片", e))?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(10000);
+    limits.max_image_height = Some(10000);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let mut image = reader
+        .decode()
+        .map_err(|_| "无法读取图片，请选择 JPG、PNG 或 WebP 封面")?;
+    let side = image.width().min(image.height());
+    let cropped = image.crop(
+        (image.width() - side) / 2,
+        (image.height() - side) / 2,
+        side,
+        side,
+    );
+    for size in [1024, 896, 768, 640, 513] {
+        let square = cropped
+            .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+            .to_rgb8();
+        let mut jpg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpg, 100)
+            .encode_image(&square)
+            .map_err(|e| issue("无法生成 JPG 封面", e))?;
+        if jpg.len() <= COVER_BYTES {
+            return Ok(jpg);
+        }
+    }
+    Err("无法生成不超过 1.5 MB 的 JPG 封面".into())
+}
+
+fn cover_data(bytes: &[u8]) -> String {
+    format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes))
+}
+
+fn find_draft<'a>(guard: &'a mut Option<Draft>, id: &str) -> Result<&'a mut Draft> {
+    guard
+        .as_mut()
+        .filter(|draft| draft.id == id)
+        .ok_or("当前解析结果已失效，请返回并重新解析".into())
+}
+
+async fn audio_source(state: &State, draft: &mut Draft, quality: &str) -> Result<PathBuf> {
+    if !draft
+        .metadata
+        .qualities
+        .iter()
+        .any(|item| item.id == quality)
+    {
+        return Err("请选择一种可用的音质".into());
+    }
+    let cache = if draft
+        .metadata
+        .qualities
+        .last()
+        .is_some_and(|item| item.id == quality)
+    {
+        &mut draft.lowest_file
+    } else {
+        &mut draft.cached_file
+    };
+    if let Some((id, dir)) = &*cache {
+        if id == quality {
+            return Ok(dir.path().join("source.media"));
+        }
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("beatmaps-audio-")
+        .tempdir()
+        .map_err(|e| issue("无法创建音频临时目录", e))?;
+    let path = dir.path().join("source.media");
+    platform::download(state, &draft.metadata.source, quality, &path).await?;
+    *cache = Some((quality.to_owned(), dir));
+    Ok(path)
+}
+
+#[tauri::command]
+pub async fn analyze_audio(id: String, state: tauri::State<'_, State>) -> Result<tempo::Analysis> {
+    let mut guard = state.draft.lock().await;
+    let draft = find_draft(&mut guard, &id)?;
+    if let Some(analysis) = draft.analysis {
+        return Ok(analysis);
+    }
+    let quality = draft.lowest_quality()?;
+    let input = audio_source(&state, draft, &quality).await?;
+    let mut process = ffmpeg_input(&state, &input, "error");
+    process.args([
+        "-ac",
+        "2",
+        "-ar",
+        &tempo::RATE.to_string(),
+        "-c:a",
+        "pcm_f32le",
+        "-f",
+        "wav",
+        "pipe:1",
+    ]);
+    let output = tools::run(process, "FFmpeg", 300).await?;
+    drop(guard);
+    let analysis = tauri::async_runtime::spawn_blocking(move || {
+        tempo::analyze(tempo::wave_samples(&output.stdout)?)
+    })
+    .await
+    .map_err(|e| issue("无法分析音频", e))??;
+    if let Ok(draft) = find_draft(&mut *state.draft.lock().await, &id) {
+        draft.analysis = Some(analysis);
+    }
+    Ok(analysis)
+}
+
+#[tauri::command]
+pub async fn preview_audio(
+    id: String,
+    shift: Option<f64>,
+    app: AppHandle,
+    state: tauri::State<'_, State>,
+) -> Result<String> {
+    let mut guard = state.draft.lock().await;
+    let draft = find_draft(&mut guard, &id)?;
+    let shift = shift.unwrap_or_default();
+    draft.shifted_duration(shift)?;
+    if let Some((previous_shift, clip)) = &draft.preview_clip {
+        let path = clip.path();
+        if *previous_shift == shift && path.is_file() {
+            return Ok(path.to_string_lossy().into_owned());
+        }
+    }
+    let quality = draft.lowest_quality()?;
+    emit_progress(&app, "preview", "正在获取最低音质音轨");
+    let path = audio_source(&state, draft, &quality).await?;
+    emit_progress(&app, "preview", "正在准备试听音轨");
+    let clip = PreviewClip {
+        dir: tempfile::Builder::new()
+            .prefix("beatmaps-preview-")
+            .tempdir()
+            .map_err(|e| issue("无法创建预览临时目录", e))?,
+        scope: app.asset_protocol_scope(),
+    };
+    let clip_path = clip.path();
+    let mut process = ffmpeg_input(&state, &path, "error");
+    if shift != 0.0 {
+        let source = probe_audio(&state, &path).await?;
+        process.args(["-af", &alignment_filter(shift, source.rate)?]);
+    }
+    process
+        .args(["-c:a", "libvorbis", "-q:a", "3"])
+        .arg(&clip_path);
+    tools::run(process, "FFmpeg", 300).await?;
+    clip.scope
+        .allow_file(&clip_path)
+        .map_err(|e| issue("无法加载试听音轨", e))?;
+    draft.preview_clip = Some((shift, clip));
+    Ok(clip_path.to_string_lossy().into_owned())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRequest {
+    id: String,
+    quality: String,
+    title: String,
+    subtitle: String,
+    artist: String,
+    mapper: String,
+    bpm: f64,
+    version: MapVersion,
+    preview: Option<PreviewRange>,
+    #[serde(default)]
+    shift: f64,
+}
+
+#[tauri::command]
+pub async fn export_map(
+    payload: ExportRequest,
+    app: AppHandle,
+    state: tauri::State<'_, State>,
+) -> Result<String> {
+    if payload.title.trim().is_empty() || !(1.0..=1000.0).contains(&payload.bpm) {
+        return Err("请输入曲名以及 1 至 1000 之间的 BPM".into());
+    }
+    let game = discovery::game_dir(&state.settings()?.game_dir)
+        .ok_or("导出前请在设置中选择 Beat Saber 游戏目录")?;
+    let mut guard = state.draft.lock().await;
+    let draft = find_draft(&mut guard, &payload.id)?;
+    let preview = draft.selected_preview(payload.preview, payload.shift)?;
+    emit_progress(&app, "export", "正在获取所选音轨");
+    let input = audio_source(&state, draft, &payload.quality).await?;
+    let mut source = probe_audio(&state, &input).await?;
+    if source.bitrate == 0 && !source.lossless() {
+        source.bitrate = draft
+            .metadata
+            .qualities
+            .iter()
+            .find(|item| item.id == payload.quality)
+            .map_or(0, |item| item.bitrate.saturating_mul(1000));
+    }
+    let parent = game.join("Beat Saber_Data/CustomWIPLevels");
+    fs::create_dir_all(&parent).map_err(|e| issue("无法创建 CustomWIPLevels 目录", e))?;
+    let stage = tempfile::Builder::new()
+        .prefix(".beatmaps-")
+        .tempdir_in(&parent)
+        .map_err(|e| issue("无法创建导出目录，请检查游戏目录的写入权限", e))?;
+    let song = stage.path().join("song.ogg");
+    emit_progress(&app, "export", "正在转换为 Ogg Vorbis");
+    let alignment = alignment_filter(payload.shift, source.rate)?;
+    let (rate, samples, lufs) = encode_song(&state, &input, &song, &source, &alignment, || {
+        emit_progress(&app, "export", "正在将 Ogg 音频压到 10 MB 以内");
+    })
+    .await?;
+    emit_progress(&app, "export", "正在写入谱面文件");
+    fs::write(stage.path().join(COVER_FILE), &draft.cover).map_err(|e| issue("无法写入封面", e))?;
+    write_map(stage.path(), &payload, rate, samples, lufs, preview)?;
+    let folder = folder_name(&payload.title, &payload.artist);
+    let published = publish(stage.path(), &parent, &folder)?;
+    Ok(published.to_string_lossy().into_owned())
+}
+
+async fn encode_song(
+    state: &State,
+    input: &Path,
+    song: &Path,
+    source: &AudioSource,
+    alignment: &str,
+    on_size_limit: impl FnOnce(),
+) -> Result<(u32, u64, f64)> {
+    const LUFS_FILTER: &str = "ebur128=framelog=verbose";
+    let filters = if alignment.is_empty() {
+        LUFS_FILTER.into()
+    } else {
+        format!("{alignment},{LUFS_FILTER}")
+    };
+    let encode = |option: &str, value: &str| {
+        let mut process = ffmpeg_input(state, input, "info");
+        process
+            .args([
+                "-y",
+                "-af",
+                &filters,
+                "-c:a",
+                "libvorbis",
+                option,
+                value,
+                "-f",
+                "ogg",
+            ])
+            .arg(song);
+        tools::run(process, "FFmpeg", 300)
+    };
+    let size = || {
+        fs::metadata(song)
+            .map(|file| file.len())
+            .map_err(|e| issue("无法读取 Ogg 文件大小", e))
+    };
+    let mut copied = source.codec == "vorbis" && alignment.is_empty();
+    let mut output = if copied {
+        let mut process = ffmpeg_input(state, input, "info");
+        process.args(["-c:a", "copy", "-f", "ogg"]).arg(song);
+        tools::run(process, "FFmpeg", 300).await?
+    } else if source.lossless() {
+        encode("-q:a", "10").await?
+    } else if source.bitrate > 0 {
+        encode("-b:a", &source.bitrate.to_string()).await?
+    } else {
+        encode("-q:a", "7").await?
+    };
+
+    if size()? > SONG_BYTES {
+        on_size_limit();
+        let (rate, samples) = vorbis_samples(song)?;
+        let mut bitrate =
+            (SONG_BYTES as f64 * 8.0 * f64::from(rate) / samples as f64 * 0.98) as u64;
+        let mut within_limit = false;
+        for _ in 0..4 {
+            match encode("-b:a", &bitrate.to_string()).await {
+                Ok(encoded) => output = encoded,
+                Err(error)
+                    if error.contains("encoder setup failed")
+                        || error.contains("Error while opening encoder") =>
+                {
+                    break
+                }
+                Err(error) => return Err(error),
+            }
+            let bytes = size()?;
+            if bytes <= SONG_BYTES {
+                within_limit = true;
+                break;
+            }
+            bitrate = (bitrate as f64 * SONG_BYTES as f64 / bytes as f64 * 0.97) as u64;
+        }
+        if !within_limit {
+            for quality in ["5", "2", "0", "-1"] {
+                output = encode("-q:a", quality).await?;
+                if size()? <= SONG_BYTES {
+                    break;
+                }
+            }
+        }
+        copied = false;
+    }
+
+    if size()? > SONG_BYTES {
+        return Err("保留整首音轨时无法将 song.ogg 压到 10 MB 以内".into());
+    }
+
+    if copied {
+        let mut measure = ffmpeg_input(state, song, "info");
+        measure
+            .args([
+                "-af",
+                LUFS_FILTER,
+                "-c:a",
+                "pcm_f32le",
+                "-f",
+                "wav",
+                "pipe:1",
+            ])
+            .stdout(std::process::Stdio::null());
+        output = tools::run(measure, "FFmpeg", 300).await?;
+    }
+    let lufs = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .rev()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("I:")?
+                .split_whitespace()
+                .next()?
+                .parse::<f64>()
+                .ok()
+        })
+        .unwrap_or_default();
+    let song = song.to_path_buf();
+    let (rate, samples) = tauri::async_runtime::spawn_blocking(move || vorbis_samples(&song))
+        .await
+        .map_err(|_| "无法读取导出音频".to_owned())??;
+    Ok((rate, samples, lufs))
+}
+
+fn ffmpeg_input(state: &State, path: &Path, loglevel: &str) -> tokio::process::Command {
+    let mut process = tools::command(state, "ffmpeg");
+    process
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-nostats",
+            "-v",
+            loglevel,
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
+        ])
+        .arg(path)
+        .args(["-map", "0:a:0", "-map_metadata", "-1", "-vn", "-sn", "-dn"]);
+    process
+}
+
+struct AudioSource {
+    codec: String,
+    rate: u32,
+    bitrate: u64,
+}
+
+impl AudioSource {
+    fn lossless(&self) -> bool {
+        matches!(self.codec.as_str(), "flac" | "alac") || self.codec.starts_with("pcm_")
+    }
+}
+
+fn probe_number(value: &Value) -> u64 {
+    value
+        .as_u64()
+        .or_else(|| value.as_str()?.parse().ok())
+        .unwrap_or_default()
+}
+
+async fn probe_audio(state: &State, path: &Path) -> Result<AudioSource> {
+    let mut probe = tools::command(state, "ffprobe");
+    probe
+        .args([
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name,sample_rate,bit_rate,duration:format=duration",
+            "-of",
+            "json",
+        ])
+        .arg(path);
+    let output = tools::run(probe, "FFprobe", 60).await?;
+    let json: Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| issue("无法读取音轨参数", e))?;
+    let audio = &json["streams"][0];
+    let rate = probe_number(&audio["sample_rate"]) as u32;
+    if rate == 0 {
+        return Err("无法读取音轨采样率".into());
+    }
+    let mut source = AudioSource {
+        codec: audio["codec_name"].as_str().unwrap_or_default().into(),
+        rate,
+        bitrate: probe_number(&audio["bit_rate"]),
+    };
+    if !source.lossless() && source.bitrate == 0 {
+        // Opus in WebM generally exposes no stream bitrate. Count the selected audio packets.
+        let duration = [&audio["duration"], &json["format"]["duration"]]
+            .into_iter()
+            .filter_map(|value| value.as_str()?.parse::<f64>().ok())
+            .find(|value| *value > 0.0);
+        if let Some(duration) = duration {
+            let mut probe = tools::command(state, "ffprobe");
+            probe
+                .args([
+                    "-v",
+                    "error",
+                    "-protocol_whitelist",
+                    "file,pipe",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "packet=size",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(path);
+            let output = tools::run(probe, "FFprobe", 60).await?;
+            let bytes: u64 = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split(',').next()?.trim().parse::<u64>().ok())
+                .sum();
+            source.bitrate = (bytes as f64 * 8.0 / duration).round() as u64;
+        }
+    }
+    Ok(source)
+}
+
+fn alignment_filter(shift: f64, rate: u32) -> Result<String> {
+    let samples = (shift * f64::from(rate)).round();
+    if !samples.is_finite() || samples.abs() > f64::from(i32::MAX) {
+        return Err("音频偏移超出可调整范围".into());
+    }
+    Ok(match samples as i64 {
+        0 => String::new(),
+        count if count < 0 => format!("atrim=start_sample={},asetpts=PTS-STARTPTS", -count),
+        count => format!("adelay={count}S:all=1"),
+    })
+}
+
+fn vorbis_samples(path: &Path) -> Result<(u32, u64)> {
+    let file = fs::File::open(path).map_err(|e| issue("无法打开导出音频", e))?;
+    let mut reader = PacketReader::new(std::io::BufReader::new(file));
+    let header = reader
+        .read_packet()
+        .map_err(|e| issue("无法读取 Ogg 音频", e))?
+        .filter(|packet| packet.data.starts_with(b"\x01vorbis") && packet.data.len() >= 16)
+        .ok_or("导出的文件缺少 Vorbis 音轨")?;
+    let rate = u32::from_le_bytes(header.data[12..16].try_into().unwrap());
+    while let Some(packet) = reader
+        .read_packet()
+        .map_err(|e| issue("无法读取 Ogg 音频", e))?
+    {
+        if packet.last_in_stream()
+            && packet.stream_serial() == header.stream_serial()
+            && rate > 0
+            && (1..=i32::MAX as u64).contains(&packet.absgp_page())
+        {
+            return Ok((rate, packet.absgp_page()));
+        }
+    }
+    Err("导出音频没有有效时长".into())
+}
+
+fn write_map(
+    dir: &Path,
+    data: &ExportRequest,
+    rate: u32,
+    samples: u64,
+    lufs: f64,
+    preview: PreviewRange,
+) -> Result<()> {
+    let duration = samples as f64 / rate as f64;
+    let end_beat = duration * data.bpm / 60.0;
+    let preview = preview.within(duration);
+    let mut info: Value = serde_json::from_str(match data.version {
+        MapVersion::Legacy => LEGACY_TEMPLATE,
+        MapVersion::V4 => V4_TEMPLATE,
+    })
+    .map_err(|e| issue("无法读取谱面模板", e))?;
+    let version = env!("CARGO_PKG_VERSION");
+    let mapper = data.mapper.trim();
+    match data.version {
+        MapVersion::Legacy => {
+            info["_coverImageFilename"] = json!(COVER_FILE);
+            info["_songName"] = json!(data.title.trim());
+            info["_songSubName"] = json!(data.subtitle.trim());
+            info["_songAuthorName"] = json!(data.artist.trim());
+            info["_levelAuthorName"] = json!(mapper);
+            info["_beatsPerMinute"] = json!(data.bpm);
+            info["_previewStartTime"] = json!(preview.start);
+            info["_previewDuration"] = json!(preview.length());
+            info["_customData"]["_editors"]["BeatmapsStarter"]["version"] = json!(version);
+            write_json(
+                dir,
+                "BPMInfo.dat",
+                &json!({
+                    "_version": "2.0.0",
+                    "_songSampleCount": samples,
+                    "_songFrequency": rate,
+                    "_regions": [{
+                        "_startSampleIndex": 0,
+                        "_endSampleIndex": samples,
+                        "_startBeat": 0,
+                        "_endBeat": end_beat
+                    }]
+                }),
+            )?;
+        }
+        MapVersion::V4 => {
+            info["coverImageFilename"] = json!(COVER_FILE);
+            info["song"]["title"] = json!(data.title.trim());
+            info["song"]["subTitle"] = json!(data.subtitle.trim());
+            info["song"]["author"] = json!(data.artist.trim());
+            info["audio"]["bpm"] = json!(data.bpm);
+            info["audio"]["songDuration"] = json!(duration);
+            info["audio"]["lufs"] = json!(lufs);
+            info["audio"]["previewStartTime"] = json!(preview.start);
+            info["audio"]["previewDuration"] = json!(preview.length());
+            info["customData"]["editors"]["BeatmapsStarter"]["version"] = json!(version);
+            let mappers = if mapper.is_empty() {
+                Vec::new()
+            } else {
+                vec![mapper]
+            };
+            info["difficultyBeatmaps"] = json!([{
+                "characteristic": "Standard",
+                "difficulty": "ExpertPlus",
+                "beatmapAuthors": { "mappers": mappers, "lighters": [] },
+                "environmentNameIdx": 0,
+                "beatmapColorSchemeIdx": -1,
+                "noteJumpMovementSpeed": 10.0,
+                "noteJumpStartBeatOffset": 0.0,
+                "beatmapDataFilename": "ExpertPlus.dat",
+                "lightshowDataFilename": "Lightshow.dat"
+            }]);
+            write_json(dir, "ExpertPlus.dat", &json!({ "version": "4.0.0" }))?;
+            write_json(dir, "Lightshow.dat", &json!({ "version": "4.0.0" }))?;
+            write_json(
+                dir,
+                "AudioData.dat",
+                &json!({
+                    "version": "4.0.0",
+                    "songChecksum": "",
+                    "songSampleCount": samples,
+                    "songFrequency": rate,
+                    "bpmData": [{ "si": 0, "ei": samples, "sb": 0, "eb": end_beat }],
+                    "lufsData": [{ "si": 0, "ei": samples, "l": lufs }]
+                }),
+            )?;
+        }
+    }
+    write_json(dir, "Info.dat", &info)
+}
+
+fn write_json(dir: &Path, name: &str, data: &Value) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(data).map_err(|e| issue("无法生成谱面数据", e))?;
+    fs::write(dir.join(name), bytes).map_err(|e| issue("无法写入谱面数据", e))
+}
+
+fn folder_name(title: &str, artist: &str) -> String {
+    let name = if artist.trim().is_empty() {
+        title.trim().to_owned()
+    } else {
+        format!("{} - {}", title.trim(), artist.trim())
+    };
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(90)
+        .collect();
+    let name = name.trim_matches([' ', '.']);
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"].contains(&&stem[3..]);
+    if name.is_empty() {
+        "Beatmap".into()
+    } else if reserved {
+        format!("_{name}")
+    } else {
+        name.into()
+    }
+}
+
+fn publish(stage: &Path, parent: &Path, title: &str) -> Result<PathBuf> {
+    for index in 1..=1000 {
+        let name = if index == 1 {
+            title.to_owned()
+        } else {
+            format!("{title} ({index})")
+        };
+        let dest = parent.join(name);
+        if dest.exists() {
+            continue;
+        }
+        match fs::rename(stage, &dest) {
+            Ok(()) => return Ok(dest),
+            Err(_) if dest.exists() => continue,
+            Err(e) => return Err(issue("无法完成谱面导出", e)),
+        }
+    }
+    Err("同名谱面过多，请更改曲名后重试".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_exports_square_jpeg_within_limits() {
+        let cover = crop_cover(DEFAULT_COVER).unwrap();
+        assert!(cover.starts_with(&[0xff, 0xd8, 0xff]));
+        assert!(cover.len() <= COVER_BYTES);
+        let image = image::load_from_memory(&cover).unwrap();
+        assert_eq!(image.width(), image.height());
+        assert!(image.width() > 512);
+    }
+
+    #[test]
+    fn detailed_cover_is_resized_to_fit_the_limit() {
+        let mut seed = 1u32;
+        let pixels = image::RgbImage::from_fn(1024, 1024, |_, _| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let bytes = seed.to_be_bytes();
+            image::Rgb([bytes[0], bytes[1], bytes[2]])
+        });
+        let mut input = Cursor::new(Vec::new());
+        pixels
+            .write_to(&mut input, image::ImageFormat::Png)
+            .unwrap();
+        let cover = crop_cover(&input.into_inner()).unwrap();
+        assert!(cover.len() <= 1_500_000);
+        let image = image::load_from_memory(&cover).unwrap();
+        assert_eq!(image.width(), image.height());
+        assert!((513..1024).contains(&image.width()));
+    }
+
+    #[test]
+    #[ignore = "requires the bundled FFmpeg and the oversized sample Ogg"]
+    fn oversized_ogg_is_reencoded_without_cutting_the_song() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let input = manifest.join("../map_example/Represent feat. Kimbara Chieko/song.ogg");
+        assert!(fs::metadata(&input).unwrap().len() > SONG_BYTES);
+        let dir = tempfile::tempdir().unwrap();
+        let song = dir.path().join("song.ogg");
+        let state = State::new(dir.path().into(), manifest.join("runtime")).unwrap();
+        tauri::async_runtime::block_on(async {
+            let (original_rate, original_samples) = vorbis_samples(&input).unwrap();
+            let flac = dir.path().join("source.flac");
+            let mut convert = ffmpeg_input(&state, &input, "error");
+            convert.args(["-c:a", "flac"]).arg(&flac);
+            tools::run(convert, "FFmpeg", 300).await.unwrap();
+
+            for (source_path, lossless) in [(&input, false), (&flac, true)] {
+                let source = probe_audio(&state, source_path).await.unwrap();
+                assert_eq!(source.lossless(), lossless);
+                let mut capped = false;
+                let (rate, samples, _) =
+                    encode_song(&state, source_path, &song, &source, "", || capped = true)
+                        .await
+                        .unwrap();
+                let size = fs::metadata(&song).unwrap().len();
+                assert!(capped, "{} did not exercise the size limit", source.codec);
+                assert!(size <= 10_000_000);
+                assert_eq!(rate, original_rate);
+                assert!(samples.abs_diff(original_samples) <= rate as u64 / 40);
+                println!(
+                    "{} input: {} bytes, {} Hz, {} samples",
+                    source.codec, size, rate, samples
+                );
+                fs::remove_file(&song).unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn preview_uses_the_first_ten_seconds_or_the_entire_short_track() {
+        assert_eq!(
+            PreviewRange::new(None, 60.0),
+            PreviewRange {
+                start: 0.0,
+                end: 10.0
+            }
+        );
+        assert_eq!(
+            PreviewRange::new(None, 6.25),
+            PreviewRange {
+                start: 0.0,
+                end: 6.25
+            }
+        );
+    }
+
+    #[test]
+    fn chorus_preview_is_clamped_to_the_available_audio() {
+        let preview = PreviewRange::new(Some(24.5), 30.0);
+        assert_eq!(
+            preview,
+            PreviewRange {
+                start: 24.5,
+                end: 30.0
+            }
+        );
+        assert_eq!(preview.within(29.0).length(), 4.5);
+        assert_eq!(preview.within(24.0), PreviewRange::new(None, 24.0));
+    }
+
+    #[test]
+    fn edited_preview_preserves_both_points_within_the_track() {
+        let preview = PreviewRange {
+            start: 6.125,
+            end: 18.25,
+        };
+        assert_eq!(preview.validate(20.0).unwrap(), preview);
+        assert_eq!(
+            preview.validate(10.0).unwrap(),
+            PreviewRange {
+                end: 10.0,
+                ..preview
+            }
+        );
+        assert!(preview.validate(6.0).is_err());
+        assert!(PreviewRange {
+            start: 8.0,
+            end: 7.0
+        }
+        .validate(20.0)
+        .is_err());
+    }
+
+    #[test]
+    fn bpm_info_uses_final_samples_and_fractional_bpm() {
+        let dir = tempfile::tempdir().unwrap();
+        let preview = PreviewRange {
+            start: 0.0,
+            end: 3.0,
+        };
+        let data = ExportRequest {
+            id: String::new(),
+            quality: String::new(),
+            title: "Song".into(),
+            subtitle: String::new(),
+            artist: String::new(),
+            mapper: String::new(),
+            bpm: 98.625,
+            version: MapVersion::Legacy,
+            preview: Some(preview),
+            shift: 0.0,
+        };
+        write_map(dir.path(), &data, 48_000, 144_000, -14.0, preview).unwrap();
+        let info: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("Info.dat")).unwrap()).unwrap();
+        assert_eq!(info["_coverImageFilename"], COVER_FILE);
+        let bpm_info: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("BPMInfo.dat")).unwrap()).unwrap();
+        assert_eq!(bpm_info["_songFrequency"], json!(48_000));
+        assert_eq!(bpm_info["_songSampleCount"], json!(144_000));
+        assert_eq!(
+            bpm_info["_regions"][0],
+            json!({"_startSampleIndex": 0, "_endSampleIndex": 144_000, "_startBeat": 0, "_endBeat": 4.93125})
+        );
+    }
+}
