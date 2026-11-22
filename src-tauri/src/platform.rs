@@ -10,12 +10,11 @@ use crate::{
 
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 pub const BILI_REFERER: &str = "https://www.bilibili.com/";
-pub const NETEASE_LEVELS: [(&str, &str); 5] = [
+pub const NETEASE_LEVELS: [(&str, &str); 4] = [
     ("standard", "标准"),
     ("higher", "较高"),
     ("exhigh", "极高"),
     ("lossless", "无损"),
-    ("hires", "Hi-Res"),
 ];
 
 #[derive(Clone, Serialize)]
@@ -175,7 +174,7 @@ async fn netease_metadata(state: &State, url: &Url, cookie: &str) -> Result<Meta
             let mut quality =
                 make_quality(level, name, item["br"].as_u64().unwrap_or_default() / 1000);
             if quality.bitrate == 0 {
-                quality.bitrate = [128, 192, 320, 800, 1400][rank];
+                quality.bitrate = [128, 192, 320, 800][rank];
             }
             qualities.push(quality);
         }
@@ -361,14 +360,13 @@ async fn bili_tracks(
         .as_array()
         .into_iter()
         .flatten()
-        .chain(dash["dolby"]["audio"].as_array().into_iter().flatten())
         .chain(
             dash.get("flac")
                 .and_then(|flac| flac.get("audio"))
                 .filter(|audio| audio.is_object()),
         )
     {
-        let Some(id) = item["id"].as_u64() else {
+        let Some(id) = item["id"].as_u64().filter(|&id| id != 30250) else {
             continue;
         };
         let url = item["baseUrl"]
@@ -380,7 +378,6 @@ async fn bili_tracks(
         }
         let name = match id {
             30251 => "Hi-Res 无损",
-            30250 => "杜比全景声",
             _ => "AAC",
         };
         tracks.push((

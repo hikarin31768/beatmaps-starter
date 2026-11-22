@@ -13,6 +13,10 @@ use crate::media::Draft;
 
 pub type Result<T> = std::result::Result<T, String>;
 
+const DEFAULT_NETEASE_QUALITY: &str = "lossless";
+const DEFAULT_BILIBILI_QUALITY: &str = "30251";
+const DEFAULT_YOUTUBE_QUALITY: &str = "160";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
@@ -52,9 +56,29 @@ impl Default for Settings {
             version: MapVersion::Legacy,
             mapper: String::new(),
             lead_in: 2.0,
-            netease_quality: "best".into(),
-            bilibili_quality: "best".into(),
-            youtube_quality: "best".into(),
+            netease_quality: DEFAULT_NETEASE_QUALITY.into(),
+            bilibili_quality: DEFAULT_BILIBILI_QUALITY.into(),
+            youtube_quality: DEFAULT_YOUTUBE_QUALITY.into(),
+        }
+    }
+}
+
+impl Settings {
+    pub fn normalize_quality_preferences(&mut self) {
+        if !crate::platform::NETEASE_LEVELS
+            .iter()
+            .any(|(level, _)| *level == self.netease_quality)
+        {
+            self.netease_quality = DEFAULT_NETEASE_QUALITY.into();
+        }
+        if !matches!(
+            self.bilibili_quality.as_str(),
+            "30251" | "30280" | "30232" | "30216"
+        ) {
+            self.bilibili_quality = DEFAULT_BILIBILI_QUALITY.into();
+        }
+        if !matches!(self.youtube_quality.as_str(), "160" | "128" | "64") {
+            self.youtube_quality = DEFAULT_YOUTUBE_QUALITY.into();
         }
     }
 }
@@ -100,7 +124,12 @@ impl State {
 
     pub fn settings(&self) -> Result<Settings> {
         match fs::read(self.dir.join("settings.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| issue("读取设置失败", e)),
+            Ok(bytes) => {
+                let mut settings: Settings =
+                    serde_json::from_slice(&bytes).map_err(|e| issue("读取设置失败", e))?;
+                settings.normalize_quality_preferences();
+                Ok(settings)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
             Err(e) => Err(issue("读取设置失败", e)),
         }

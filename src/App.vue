@@ -21,7 +21,7 @@ const navigation = [
 const steps = ['游戏目录', '流媒体账号', '谱面偏好']
 const settings = reactive({
   initialized: false, gameDir: '', theme: 'dark', version: 'legacy', mapper: '', leadIn: 2,
-  neteaseQuality: 'best', bilibiliQuality: 'best', youtubeQuality: 'best',
+  ...Object.fromEntries(platforms.map(({ qualityKey, qualities }) => [qualityKey, qualities[0][0]])),
 })
 const changes = reactive({})
 const accounts = reactive({})
@@ -655,7 +655,6 @@ async function openExport(path) {
               <h2>默认音质</h2>
               <label v-for="platform in platforms" :key="platform.id" class="settings-row">{{ platform.name }}
                 <select v-model="changes[platform.qualityKey]" :disabled="!!busy">
-                  <option value="best">最高可用音质</option>
                   <option v-for="[id, label] in platform.qualities" :key="id" :value="id">{{ label }}</option>
                 </select>
               </label>

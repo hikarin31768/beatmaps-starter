@@ -31,6 +31,7 @@ fn save_settings(mut settings: Settings, state: tauri::State<'_, State>) -> Resu
             .to_string_lossy()
             .into_owned();
     }
+    settings.normalize_quality_preferences();
     state.save_settings(&settings)?;
     Ok(settings)
 }
