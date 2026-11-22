@@ -40,3 +40,6 @@ npm run tauri dev
 三家平台的品牌图标随应用打包。 [Iconify Simple Icons](https://icon-sets.iconify.design/simple-icons/)
 
 BPM 检测参考 ArrowVortex 的起音、周期评分和节拍相位算法，使用 aubio 的 Complex 起音检测。 [ArrowVortex 源码](https://github.com/uvcat7/ArrowVortex/tree/5b63ff72ac8e6ef6af12801ebe042acdc479324f/src/Editor) · [aubio 许可证](https://github.com/aubio/aubio/blob/0.4.9/COPYING)
+
+## License
+The application source is licensed under GPL-3.0-or-later (see `LICENSE`). The bundled FFmpeg build is configured without `--enable-gpl`, so FFmpeg and its bundled libraries retain their respective upstream licenses; packaged builds include those notices under `src-tauri/runtime/licenses`.
