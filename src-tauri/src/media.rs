@@ -463,10 +463,10 @@ pub async fn export_map(
         .tempdir_in(&parent)
         .map_err(|e| issue("无法创建导出目录，请检查游戏目录的写入权限", e))?;
     let song = stage.path().join("song.ogg");
-    emit_progress(&app, "export", "正在转换为 Ogg Vorbis");
+    emit_progress(&app, "export", "正在转换为 Ogg");
     let alignment = alignment_filter(payload.shift, source.rate)?;
     let (rate, samples, lufs) = encode_song(&state, &input, &song, &source, &alignment, || {
-        emit_progress(&app, "export", "正在将 Ogg 音频压到 10 MB 以内");
+        emit_progress(&app, "export", "正在压缩 Ogg");
     })
     .await?;
     emit_progress(&app, "export", "正在写入谱面文件");

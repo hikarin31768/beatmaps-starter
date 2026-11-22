@@ -233,6 +233,13 @@ svg { flex: none; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
 .field { display: grid; gap: 7px; min-width: 0; align-content: start; font-size: 13px; font-weight: 600; }
 .fields { display: grid; gap: 12px; }
+.bpm-control { position: relative; width: 100%; }
+.bpm-control > input { padding-right: 42px; appearance: textfield; font-variant-numeric: tabular-nums; }
+.bpm-control > input::-webkit-inner-spin-button, .bpm-control > input::-webkit-outer-spin-button { appearance: none; margin: 0; }
+.bpm-adjusters { position: absolute; top: 4px; right: 4px; bottom: 4px; display: grid; grid-template-rows: 1fr 1fr; width: 29px; }
+.bpm-adjusters button { display: grid; place-items: center; min-width: 0; min-height: 0; padding: 0; border: 0; border-radius: 4px; color: var(--muted); background: transparent; }
+.bpm-adjusters button:not(:disabled):hover { color: var(--accent-text); background: var(--surface-raised); }
+.bpm-adjusters button:disabled { opacity: .4; cursor: default; }
 .result-page { padding-top: 25px; }
 .result-page form { display: grid; gap: 14px; }
 .media-summary { display: flex; align-items: center; gap: 21px; margin: 16px 0 4px; min-width: 0; }

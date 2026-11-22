@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
-  ArrowDownToLine, ArrowLeft, ArrowRight, AudioLines, Check, ChevronRight, FileImage, Folder,
+  ArrowDownToLine, ArrowLeft, ArrowRight, AudioLines, Check, ChevronDown, ChevronRight, ChevronUp, FileImage, Folder,
   FolderOpen, House, Link2, LoaderCircle, Minus, Pencil, Settings2, Square, UserRound, X,
 } from 'lucide-vue-next'
 import LoginPage from './components/LoginPage.vue'
@@ -66,6 +66,8 @@ const initialized = computed(() => settings.initialized)
 const sourcePlatform = computed(() => platforms.find(({ id }) => id === media.value?.platform))
 const trackDuration = computed(() => (media.value?.duration || media.value?.preview.end || 0) + (map.shift || 0))
 const canAlign = computed(() => analysis.value?.firstBeat != null && map.bpm >= 1 && map.bpm <= 1000)
+const canDoubleBpm = computed(() => Number.isFinite(Number(map.bpm)) && Number(map.bpm) >= 1 && Number(map.bpm) <= 500)
+const canHalveBpm = computed(() => Number.isFinite(Number(map.bpm)) && Number(map.bpm) >= 2 && Number(map.bpm) <= 1000)
 const currentLeadIn = computed(() => analysis.value ? Math.max(0, analysis.value.leading + map.shift) : null)
 const fixedLeadTarget = computed(() => fixedLeadOverride.value ?? settings.leadIn)
 const validFixedLead = computed(() => Number.isFinite(fixedLeadInput.value) && fixedLeadInput.value >= 0)
@@ -76,6 +78,13 @@ let releaseProgress
 let toastTimer
 
 function syncTheme(event) { systemDark.value = event.matches }
+function adjustBpm(multiplier) {
+  const bpm = Number(map.bpm)
+  if (!Number.isFinite(bpm) || bpm < 1 || bpm > 1000) return
+  const adjusted = bpm * multiplier
+  if (adjusted < 1 || adjusted > 1000) return
+  map.bpm = Number(adjusted.toPrecision(12))
+}
 watch(effectiveTheme, color => { document.documentElement.dataset.theme = color }, { immediate: true })
 watch([page, step, login], () => scroll.value?.scrollTo(0, 0))
 watch(() => map.shift, () => { preview.value = '' })
@@ -559,8 +568,18 @@ async function openExport(path) {
               <div class="fields result-fields">
                 <label class="field">谱面版本<select v-model="map.version" :disabled="!!busy"><option value="legacy">V2 / V3</option><option value="v4">V4</option></select></label>
                 <label class="field">谱师<input v-model="map.mapper" maxlength="120" placeholder="填写谱师名称" :disabled="!!busy" /></label>
-                <label class="field">BPM<input v-model.number="map.bpm" type="number" min="1" max="1000" step="any"
-                  :placeholder="analyzing ? '正在分析…' : '手动填写'" :aria-busy="analyzing" required :disabled="!!busy || analyzing" /></label>
+                <div class="field bpm-field">
+                  <label for="map-bpm">BPM</label>
+                  <div class="bpm-control">
+                    <input id="map-bpm" v-model.number="map.bpm" type="number" min="1" max="1000" step="any"
+                      :placeholder="analyzing ? '正在分析…' : '手动填写'" :aria-busy="analyzing" aria-label="BPM，向上键翻倍，向下键减半"
+                      required :disabled="!!busy || analyzing" @keydown.up.prevent="adjustBpm(2)" @keydown.down.prevent="adjustBpm(0.5)" />
+                    <span class="bpm-adjusters">
+                      <button type="button" aria-label="BPM 翻倍" title="翻倍" :disabled="!!busy || analyzing || !canDoubleBpm" @click="adjustBpm(2)"><ChevronUp :size="15" /></button>
+                      <button type="button" aria-label="BPM 减半" title="减半" :disabled="!!busy || analyzing || !canHalveBpm" @click="adjustBpm(0.5)"><ChevronDown :size="15" /></button>
+                    </span>
+                  </div>
+                </div>
               </div>
               <div v-if="analysisError" class="alignment-controls">
                 <p class="muted" role="status">BPM 分析失败，{{ analysisError }}</p>
