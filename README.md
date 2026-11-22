@@ -31,7 +31,7 @@ npm run tauri dev
 
 执行 `npm run package:windows` 时，脚本会将网易云助手的运行依赖合并为脚本和数据文件，再和音频版 FFmpeg、FFprobe、本机 Node.js 以及校验后的 yt-dlp 一起打包。可以用 `BEATMAPS_FFMPEG` 和 `BEATMAPS_FFPROBE` 指定独立版本。安装包输出在 `src-tauri/target/release/bundle/nsis`。
 
-自动更新使用 `https://github.com/hikarin31768/beatmaps-starter/releases/latest/download/latest.json`，GitHub 会将 `releases/latest` 指向最新的正式版。推送普通提交仍会生成预发布版本；发布正式版时，将与 `src-tauri/tauri.conf.json` 中版本一致的 `v<版本号>` 标签推送到 GitHub。工作流会签署安装包并生成 `latest.json`。GitHub Actions 需要配置 `TAURI_SIGNING_PRIVATE_KEY` 仓库 Secret；对应公钥已随应用配置。 [Tauri 更新发布说明](https://v2.tauri.app/plugin/updater/)
+自动更新从 GitHub 的 `releases/latest/download/latest.json` 检查最新正式版。普通推送会生成预发布版，仅修改 Markdown、`docs/` 或 `.gitignore` 时跳过打包。推送与 `src-tauri/tauri.conf.json` 版本一致的 `v<版本号>` 标签会触发正式发布。工作流使用仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 签署 NSIS 安装包，并随发布上传 `latest.json`。 [Tauri 更新发布说明](https://v2.tauri.app/plugin/updater/)
 
 界面沿用了 Tauri Vue Template 的窗口与导航结构。 [Tauri Vue Template](https://github.com/Ming-D-W/Tauri-Vue-Template) · [MIT 许可](TEMPLATE-LICENSE)
 

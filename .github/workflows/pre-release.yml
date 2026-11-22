@@ -2,6 +2,11 @@ name: Build Windows releases
 
 on:
   push:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.markdown'
+      - 'docs/**'
+      - '.gitignore'
   workflow_dispatch:
 
 permissions:
@@ -74,8 +79,6 @@ jobs:
       - name: Build the signed Windows installer
         run: npm run package:windows
         env:
-          BEATMAPS_UPDATE_ENDPOINT: https://github.com/hikarin31768/beatmaps-starter/releases/latest/download/latest.json
-          BEATMAPS_UPDATE_PUBKEY: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4Mjc3MTAwMDBDNjhDODQKUldTRWpNWUFBSEVuT0FOcGM4RFI2bWJBdmJZd29WUEdYUmVUN2VOUE9OcXV2eDRNS3UzSmdyaEQK
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       - name: Create updater manifest
@@ -87,6 +90,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.channel.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
           name: ${{ steps.channel.outputs.release_name }}
           body: |
             Windows installer and signed updater package for Beatmaps Starter.
@@ -94,10 +98,10 @@ jobs:
             Commit: `${{ github.sha }}`
           prerelease: ${{ steps.channel.outputs.prerelease }}
           make_latest: ${{ steps.channel.outputs.make_latest }}
+          fail_on_unmatched_files: true
           files: |
-            src-tauri/target/release/bundle/nsis/*-setup.exe
-            src-tauri/target/release/bundle/nsis/*.nsis.zip
-            src-tauri/target/release/bundle/nsis/*.nsis.zip.sig
-            latest.json
+            src-tauri/target/release-assets/*-setup.exe
+            src-tauri/target/release-assets/*-setup.exe.sig
+            src-tauri/target/release-assets/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

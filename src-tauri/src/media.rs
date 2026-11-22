@@ -23,11 +23,10 @@ const COVER_LIMIT: u64 = 20 * 1024 * 1024;
 const COVER_BYTES: usize = 1_500_000;
 const COVER_FILE: &str = "cover.jpg";
 const SONG_BYTES: u64 = 10_000_000;
+const SONG_FILE: &str = "song.ogg";
+const AUDIO_DATA_FILE: &str = "AudioData.dat";
 const PREVIEW_SECONDS: f64 = 10.0;
 const DEFAULT_COVER: &[u8] = include_bytes!("../icons/icon.png");
-const LEGACY_TEMPLATE: &str =
-    include_str!("../../map_example/CustomWIPLevels/example_v2v3/Info.dat");
-const V4_TEMPLATE: &str = include_str!("../../map_example/CustomWIPLevels/example_v4/Info.dat");
 
 pub struct Draft {
     id: String,
@@ -462,7 +461,7 @@ pub async fn export_map(
         .prefix(".beatmaps-")
         .tempdir_in(&parent)
         .map_err(|e| issue("无法创建导出目录，请检查游戏目录的写入权限", e))?;
-    let song = stage.path().join("song.ogg");
+    let song = stage.path().join(SONG_FILE);
     emit_progress(&app, "export", "正在转换为 Ogg");
     let alignment = alignment_filter(payload.shift, source.rate)?;
     let (rate, samples, lufs) = encode_song(&state, &input, &song, &source, &alignment, || {
@@ -745,24 +744,10 @@ fn write_map(
     let duration = samples as f64 / rate as f64;
     let end_beat = duration * data.bpm / 60.0;
     let preview = preview.within(duration);
-    let mut info: Value = serde_json::from_str(match data.version {
-        MapVersion::Legacy => LEGACY_TEMPLATE,
-        MapVersion::V4 => V4_TEMPLATE,
-    })
-    .map_err(|e| issue("无法读取谱面模板", e))?;
     let version = env!("CARGO_PKG_VERSION");
     let mapper = data.mapper.trim();
-    match data.version {
+    let info = match data.version {
         MapVersion::Legacy => {
-            info["_coverImageFilename"] = json!(COVER_FILE);
-            info["_songName"] = json!(data.title.trim());
-            info["_songSubName"] = json!(data.subtitle.trim());
-            info["_songAuthorName"] = json!(data.artist.trim());
-            info["_levelAuthorName"] = json!(mapper);
-            info["_beatsPerMinute"] = json!(data.bpm);
-            info["_previewStartTime"] = json!(preview.start);
-            info["_previewDuration"] = json!(preview.length());
-            info["_customData"]["_editors"]["BeatmapsStarter"]["version"] = json!(version);
             write_json(
                 dir,
                 "BPMInfo.dat",
@@ -778,39 +763,44 @@ fn write_map(
                     }]
                 }),
             )?;
+            json!({
+                "_version": "2.1.0",
+                "_songName": data.title.trim(),
+                "_songSubName": data.subtitle.trim(),
+                "_songAuthorName": data.artist.trim(),
+                "_levelAuthorName": mapper,
+                "_beatsPerMinute": data.bpm,
+                "_songTimeOffset": 0,
+                "_shuffle": 0,
+                "_shufflePeriod": 0,
+                "_previewStartTime": preview.start,
+                "_previewDuration": preview.length(),
+                "_songFilename": SONG_FILE,
+                "_coverImageFilename": COVER_FILE,
+                "_environmentName": "DefaultEnvironment",
+                "_allDirectionsEnvironmentName": "GlassDesertEnvironment",
+                "_environmentNames": ["DefaultEnvironment"],
+                "_colorSchemes": [],
+                "_difficultyBeatmapSets": [],
+                "_customData": {
+                    "_editors": {
+                        "_lastEditedBy": "BeatmapsStarter",
+                        "BeatmapsStarter": { "version": version }
+                    }
+                }
+            })
         }
         MapVersion::V4 => {
-            info["coverImageFilename"] = json!(COVER_FILE);
-            info["song"]["title"] = json!(data.title.trim());
-            info["song"]["subTitle"] = json!(data.subtitle.trim());
-            info["song"]["author"] = json!(data.artist.trim());
-            info["audio"]["bpm"] = json!(data.bpm);
-            info["audio"]["songDuration"] = json!(duration);
-            info["audio"]["lufs"] = json!(lufs);
-            info["audio"]["previewStartTime"] = json!(preview.start);
-            info["audio"]["previewDuration"] = json!(preview.length());
-            info["customData"]["editors"]["BeatmapsStarter"]["version"] = json!(version);
             let mappers = if mapper.is_empty() {
                 Vec::new()
             } else {
                 vec![mapper]
             };
-            info["difficultyBeatmaps"] = json!([{
-                "characteristic": "Standard",
-                "difficulty": "ExpertPlus",
-                "beatmapAuthors": { "mappers": mappers, "lighters": [] },
-                "environmentNameIdx": 0,
-                "beatmapColorSchemeIdx": -1,
-                "noteJumpMovementSpeed": 10.0,
-                "noteJumpStartBeatOffset": 0.0,
-                "beatmapDataFilename": "ExpertPlus.dat",
-                "lightshowDataFilename": "Lightshow.dat"
-            }]);
             write_json(dir, "ExpertPlus.dat", &json!({ "version": "4.0.0" }))?;
             write_json(dir, "Lightshow.dat", &json!({ "version": "4.0.0" }))?;
             write_json(
                 dir,
-                "AudioData.dat",
+                AUDIO_DATA_FILE,
                 &json!({
                     "version": "4.0.0",
                     "songChecksum": "",
@@ -820,8 +810,46 @@ fn write_map(
                     "lufsData": [{ "si": 0, "ei": samples, "l": lufs }]
                 }),
             )?;
+            json!({
+                "version": "4.0.1",
+                "song": {
+                    "title": data.title.trim(),
+                    "subTitle": data.subtitle.trim(),
+                    "author": data.artist.trim()
+                },
+                "audio": {
+                    "songFilename": SONG_FILE,
+                    "songDuration": duration,
+                    "audioDataFilename": AUDIO_DATA_FILE,
+                    "bpm": data.bpm,
+                    "lufs": lufs,
+                    "previewStartTime": preview.start,
+                    "previewDuration": preview.length()
+                },
+                "songPreviewFilename": SONG_FILE,
+                "coverImageFilename": COVER_FILE,
+                "environmentNames": ["DefaultEnvironment"],
+                "colorSchemes": [],
+                "difficultyBeatmaps": [{
+                    "characteristic": "Standard",
+                    "difficulty": "ExpertPlus",
+                    "beatmapAuthors": { "mappers": mappers, "lighters": [] },
+                    "environmentNameIdx": 0,
+                    "beatmapColorSchemeIdx": -1,
+                    "noteJumpMovementSpeed": 10.0,
+                    "noteJumpStartBeatOffset": 0.0,
+                    "beatmapDataFilename": "ExpertPlus.dat",
+                    "lightshowDataFilename": "Lightshow.dat"
+                }],
+                "customData": {
+                    "editors": {
+                        "lastEditedBy": "BeatmapsStarter",
+                        "BeatmapsStarter": { "version": version }
+                    }
+                }
+            })
         }
-    }
+    };
     write_json(dir, "Info.dat", &info)
 }
 
@@ -922,10 +950,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the bundled FFmpeg and the oversized sample Ogg"]
+    #[ignore = "requires FFmpeg and an oversized Ogg Vorbis input set via BEATMAPS_TEST_OVERSIZED_OGG"]
     fn oversized_ogg_is_reencoded_without_cutting_the_song() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let input = manifest.join("../map_example/Represent feat. Kimbara Chieko/song.ogg");
+        let input = PathBuf::from(
+            std::env::var_os("BEATMAPS_TEST_OVERSIZED_OGG")
+                .expect("set BEATMAPS_TEST_OVERSIZED_OGG to an Ogg Vorbis file larger than 10 MB"),
+        );
         assert!(fs::metadata(&input).unwrap().len() > SONG_BYTES);
         let dir = tempfile::tempdir().unwrap();
         let song = dir.path().join("song.ogg");

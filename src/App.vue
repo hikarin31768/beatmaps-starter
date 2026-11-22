@@ -175,7 +175,7 @@ function checkForUpdates() {
     updateStatus.value = ''
     try {
       updateVersion.value = await invoke('check_update') || ''
-      updateStatus.value = updateVersion.value ? `发现新版本 ${updateVersion.value}` : '已是最新版本'
+      updateStatus.value = updateVersion.value ? `发现新版本 ${updateVersion.value}` : '没有可用的正式版更新'
     } catch (reason) {
       updateStatus.value = String(reason)
     }

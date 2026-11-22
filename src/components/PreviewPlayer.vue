@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { LoaderCircle, Pause, Play } from 'lucide-vue-next'
 import { durationText } from '../platforms'
 
@@ -21,6 +21,8 @@ const position = ref(props.range.start)
 const decodedDuration = ref(0)
 let drag = null
 let seeked = false
+let previewEnd = null
+let playbackFrame = 0
 const duration = computed(() => decodedDuration.value || props.trackDuration)
 const buttonLabel = computed(() => {
   if (props.loading) return '正在准备预览'
@@ -29,16 +31,30 @@ const buttonLabel = computed(() => {
 
 watch(() => props.src, () => {
   audio.value?.pause()
+  stopTracking()
+  previewEnd = null
   decodedDuration.value = 0
   playing.value = false
 })
 watch(() => props.range.start, start => {
   if (!props.src && !seeked) position.value = start
 })
-onBeforeUnmount(() => audio.value?.pause())
+onMounted(() => {
+  window.addEventListener('keydown', snapWithCtrl)
+  window.addEventListener('keyup', releaseCtrl)
+  window.addEventListener('blur', releaseDrag)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', snapWithCtrl)
+  window.removeEventListener('keyup', releaseCtrl)
+  window.removeEventListener('blur', releaseDrag)
+  releaseDrag()
+  stopTracking()
+  audio.value?.pause()
+})
 
 function percent(seconds) {
-  return `${Math.min(seconds / duration.value, 1) * 100}%`
+  return duration.value ? `${Math.min(seconds / duration.value, 1) * 100}%` : '0%'
 }
 
 const markerBounds = computed(() => {
@@ -49,26 +65,59 @@ const markerBounds = computed(() => {
 
 function setMarker(point, seconds) {
   const [min, max] = markerBounds.value[point]
-  const time = Math.max(min, Math.min(max, Math.round(seconds * 1000) / 1000))
+  const time = Math.max(min, Math.min(max, seconds))
   if (!props.disabled && time !== props.range[point]) emit('update:range', { ...props.range, [point]: time })
 }
 
 function startDrag(point, event) {
-  if (event.button !== 0 || drag) return
+  if (event.button !== 0 || drag || !duration.value) return
   const width = markersRail.value.clientWidth
   if (!width) return
   event.preventDefault()
   event.currentTarget.focus()
-  event.currentTarget.setPointerCapture(event.pointerId)
-  drag = { point, id: event.pointerId, x: event.clientX, time: props.range[point], secondsPerPixel: duration.value / width }
+  const target = event.currentTarget
+  target.setPointerCapture(event.pointerId)
+  drag = { point, target, id: event.pointerId, x: event.clientX, time: props.range[point], secondsPerPixel: duration.value / width, snapped: false }
+  if (event.ctrlKey) snapDrag()
 }
 
 function moveDrag(event) {
-  if (drag?.id === event.pointerId) setMarker(drag.point, drag.time + (event.clientX - drag.x) * drag.secondsPerPixel)
+  if (drag?.id !== event.pointerId) return
+  if (!(event.buttons & 1)) {
+    releaseDrag()
+  } else if (event.ctrlKey) {
+    snapDrag()
+  } else if (drag.snapped) {
+    releaseDrag()
+  } else {
+    const time = drag.time + (event.clientX - drag.x) * drag.secondsPerPixel
+    setMarker(drag.point, Math.round(time * 1000) / 1000)
+  }
+}
+
+function snapDrag() {
+  if (!drag) return
+  drag.snapped = true
+  setMarker(drag.point, position.value)
+}
+
+function snapWithCtrl(event) {
+  if (event.key === 'Control') snapDrag()
+}
+
+function releaseCtrl(event) {
+  if (event.key === 'Control' && drag?.snapped) releaseDrag()
+}
+
+function releaseDrag() {
+  if (!drag) return
+  const { target, id } = drag
+  drag = null
+  if (target.hasPointerCapture(id)) target.releasePointerCapture(id)
 }
 
 function endDrag(event) {
-  if (drag?.id === event.pointerId) drag = null
+  if (drag?.id === event.pointerId) releaseDrag()
 }
 
 function moveMarkerWithKey(point, event) {
@@ -78,7 +127,19 @@ function moveMarkerWithKey(point, event) {
   if (!offset && event.key !== 'Home' && event.key !== 'End') return
   event.preventDefault()
   const time = offset ? props.range[point] + offset * (event.shiftKey ? 1 : 0.1) : event.key === 'Home' ? min : max
-  setMarker(point, time)
+  setMarker(point, offset ? Math.round(time * 1000) / 1000 : time)
+}
+
+function playFrom(player, time) {
+  const start = Math.min(time, duration.value)
+  previewEnd = endForPosition(start)
+  player.currentTime = start >= duration.value ? 0 : start
+  void player.play().catch(() => {})
+}
+
+function endForPosition(time) {
+  const end = Math.min(props.range.end, duration.value)
+  return props.range.start <= time && time < end ? end : null
 }
 
 function toggle() {
@@ -87,8 +148,9 @@ function toggle() {
     return
   }
   if (audio.value.paused) {
-    if (audio.value.ended) audio.value.currentTime = Math.min(props.range.start, duration.value)
-    void audio.value.play().catch(() => {})
+    if (audio.value.readyState) {
+      playFrom(audio.value, position.value)
+    }
   } else {
     audio.value.pause()
   }
@@ -97,14 +159,47 @@ function toggle() {
 function seek(event) {
   seeked = true
   position.value = Number(event.target.value)
-  if (audio.value?.readyState) audio.value.currentTime = position.value
+  if (audio.value?.readyState) {
+    if (!audio.value.paused) previewEnd = endForPosition(position.value)
+    audio.value.currentTime = position.value
+  }
 }
 
 function startPlayback(event) {
   const player = event.target
   if (Number.isFinite(player.duration) && player.duration > 0) decodedDuration.value = player.duration
-  player.currentTime = Math.min(position.value, duration.value)
-  void player.play().catch(() => {})
+  playFrom(player, position.value)
+}
+
+function updatePosition() {
+  const player = audio.value
+  if (!player) return
+  if (previewEnd !== null && player.currentTime >= previewEnd) {
+    const end = previewEnd
+    previewEnd = null
+    player.pause()
+    if (player.currentTime !== end) player.currentTime = end
+    position.value = end
+  } else if (!player.paused || Math.abs(player.currentTime - position.value) > 0.000001) {
+    position.value = player.currentTime
+  }
+  if (drag?.snapped) snapDrag()
+}
+
+function trackPlayback() {
+  updatePosition()
+  if (audio.value && !audio.value.paused) playbackFrame = requestAnimationFrame(trackPlayback)
+}
+
+function startTracking() {
+  playing.value = true
+  cancelAnimationFrame(playbackFrame)
+  playbackFrame = requestAnimationFrame(trackPlayback)
+}
+
+function stopTracking() {
+  cancelAnimationFrame(playbackFrame)
+  playing.value = false
 }
 </script>
 
@@ -124,10 +219,11 @@ function startPlayback(event) {
             :class="`preview-marker-${point}`" :style="{ left: percent(range[point]) }" role="slider"
             :aria-label="label" :aria-valuemin="markerBounds[point][0]" :aria-valuemax="markerBounds[point][1]"
             :aria-valuenow="range[point]" :disabled="disabled"
-            @pointerdown="startDrag(point, $event)" @pointermove="moveDrag" @lostpointercapture="endDrag"
+            @pointerdown="startDrag(point, $event)" @pointermove="moveDrag"
+            @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag"
             @keydown="moveMarkerWithKey(point, $event)" />
         </div>
-        <input class="preview-seek" type="range" min="0" :max="duration" step="0.01"
+        <input class="preview-seek" type="range" min="0" :max="duration" step="any"
           :value="Math.min(position, duration)" :disabled="!canPlay || !duration"
           aria-label="全曲播放进度" @input="seek" />
         <output class="preview-range-length" aria-label="预览片段时长" aria-live="off">
@@ -137,7 +233,7 @@ function startPlayback(event) {
       <span class="preview-counter">{{ durationText(position) || '0:00' }} / {{ durationText(duration) || '0:00' }}</span>
     </div>
     <audio v-if="src" ref="audio" :src="src" preload="auto" hidden
-      @loadedmetadata="startPlayback" @timeupdate="position = $event.target.currentTime"
-      @play="playing = true" @pause="playing = false" @ended="playing = false" />
+      @loadedmetadata="startPlayback" @timeupdate="updatePosition"
+      @play="startTracking" @pause="stopTracking" @ended="stopTracking" />
   </div>
 </template>
