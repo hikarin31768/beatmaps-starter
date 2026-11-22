@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { LoaderCircle, Pause, Play } from 'lucide-vue-next'
+import { LoaderCircle, Pause, Play, SkipBack, SkipForward } from 'lucide-vue-next'
 import { durationText } from '../platforms'
 
 const props = defineProps({
@@ -10,6 +10,7 @@ const props = defineProps({
   loading: Boolean,
   disabled: Boolean,
   canPlay: Boolean,
+  active: { type: Boolean, default: true },
 })
 const emit = defineEmits(['load', 'update:range'])
 const markers = { start: '预览入点', end: '预览出点' }
@@ -24,6 +25,7 @@ let seeked = false
 let previewEnd = null
 let playbackFrame = 0
 const duration = computed(() => decodedDuration.value || props.trackDuration)
+const canSeek = computed(() => props.canPlay && duration.value > 0)
 const buttonLabel = computed(() => {
   if (props.loading) return '正在准备预览'
   return playing.value ? '暂停预览' : '播放预览'
@@ -38,6 +40,12 @@ watch(() => props.src, () => {
 })
 watch(() => props.range.start, start => {
   if (!props.src && !seeked) position.value = start
+})
+watch(() => props.active, active => {
+  if (active) return
+  releaseDrag()
+  audio.value?.pause()
+  stopTracking()
 })
 onMounted(() => {
   window.addEventListener('keydown', snapWithCtrl)
@@ -156,9 +164,9 @@ function toggle() {
   }
 }
 
-function seek(event) {
+function seek(time) {
   seeked = true
-  position.value = Number(event.target.value)
+  position.value = Math.min(time, duration.value)
   if (audio.value?.readyState) {
     if (!audio.value.paused) previewEnd = endForPosition(position.value)
     audio.value.currentTime = position.value
@@ -168,6 +176,10 @@ function seek(event) {
 function startPlayback(event) {
   const player = event.target
   if (Number.isFinite(player.duration) && player.duration > 0) decodedDuration.value = player.duration
+  if (!props.active) {
+    player.currentTime = Math.min(position.value, duration.value)
+    return
+  }
   playFrom(player, position.value)
 }
 
@@ -207,25 +219,35 @@ function stopTracking() {
   <div class="preview-player">
     <h3 class="preview-heading">试听与谱面预览区间</h3>
     <div class="preview-transport">
-      <button class="button secondary preview-toggle" type="button"
-        :disabled="loading || (!src && (disabled || !canPlay))" :aria-label="buttonLabel" :title="buttonLabel" @click="toggle">
-        <LoaderCircle v-if="loading" class="spin" :size="18" />
-        <Pause v-else-if="playing" :size="18" />
-        <Play v-else :size="18" />
-      </button>
+      <div class="preview-buttons">
+        <button class="button secondary preview-control" type="button" :disabled="!canSeek"
+          aria-label="转到入点" title="转到入点" @click="seek(range.start)">
+          <SkipBack :size="18" />
+        </button>
+        <button class="button secondary preview-control" type="button"
+          :disabled="loading || (!src && (disabled || !canPlay))" :aria-label="buttonLabel" :title="buttonLabel" @click="toggle">
+          <LoaderCircle v-if="loading" class="spin" :size="18" />
+          <Pause v-else-if="playing" :size="18" />
+          <Play v-else :size="18" />
+        </button>
+        <button class="button secondary preview-control" type="button" :disabled="!canSeek"
+          aria-label="转到出点" title="转到出点" @click="seek(range.end)">
+          <SkipForward :size="18" />
+        </button>
+      </div>
       <div class="preview-timeline" :style="{ '--preview-start': percent(range.start), '--preview-end': percent(range.end) }">
         <div ref="markersRail" class="preview-markers">
           <button v-for="(label, point) in markers" :key="point" type="button" class="preview-marker"
             :class="`preview-marker-${point}`" :style="{ left: percent(range[point]) }" role="slider"
             :aria-label="label" :aria-valuemin="markerBounds[point][0]" :aria-valuemax="markerBounds[point][1]"
-            :aria-valuenow="range[point]" :disabled="disabled"
+            :aria-valuenow="range[point]" :disabled="disabled" title="按住左键+Ctrl吸附"
             @pointerdown="startDrag(point, $event)" @pointermove="moveDrag"
             @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag"
             @keydown="moveMarkerWithKey(point, $event)" />
         </div>
         <input class="preview-seek" type="range" min="0" :max="duration" step="any"
-          :value="Math.min(position, duration)" :disabled="!canPlay || !duration"
-          aria-label="全曲播放进度" @input="seek" />
+          :value="Math.min(position, duration)" :disabled="!canSeek"
+          aria-label="全曲播放进度" @input="seek($event.target.valueAsNumber)" />
         <output class="preview-range-length" aria-label="预览片段时长" aria-live="off">
           <span>{{ seconds.format(range.end - range.start) }} 秒</span>
         </output>

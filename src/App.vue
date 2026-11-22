@@ -63,6 +63,7 @@ const osDark = window.matchMedia('(prefers-color-scheme: dark)')
 const systemDark = ref(osDark.matches)
 const effectiveTheme = computed(() => settings.theme === 'system' ? (systemDark.value ? 'dark' : 'light') : settings.theme)
 const initialized = computed(() => settings.initialized)
+const resultVisible = computed(() => page.value === 'home' && !login.value && !!media.value)
 const sourcePlatform = computed(() => platforms.find(({ id }) => id === media.value?.platform))
 const trackDuration = computed(() => (media.value?.duration || media.value?.preview.end || 0) + (map.shift || 0))
 const canAlign = computed(() => analysis.value?.firstBeat != null && map.bpm >= 1 && map.bpm <= 1000)
@@ -73,7 +74,8 @@ const fixedLeadTarget = computed(() => fixedLeadOverride.value ?? settings.leadI
 const validFixedLead = computed(() => Number.isFinite(fixedLeadInput.value) && fixedLeadInput.value >= 0)
 const seconds = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 })
 const offsetSeconds = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3, signDisplay: 'always' })
-const heading = computed(() => navigation.find(({ id }) => id === page.value)?.name ?? '解析结果')
+const heading = computed(() => navigation.find(({ id }) => id === page.value)?.name)
+let resultScrollTop = 0
 let releaseProgress
 let toastTimer
 
@@ -86,7 +88,11 @@ function adjustBpm(multiplier) {
   map.bpm = Number(adjusted.toPrecision(12))
 }
 watch(effectiveTheme, color => { document.documentElement.dataset.theme = color }, { immediate: true })
-watch([page, step, login], () => scroll.value?.scrollTo(0, 0))
+watch([page, step, login, resultVisible], async ([, , , visible], [, , , wasVisible]) => {
+  if (wasVisible && !visible) resultScrollTop = scroll.value?.scrollTop ?? 0
+  await nextTick()
+  scroll.value?.scrollTo(0, resultVisible.value ? resultScrollTop : 0)
+})
 watch(() => map.shift, () => { preview.value = '' })
 watch(() => map.bpm, () => { if (alignment.value) applyAlignment(canAlign.value ? alignment.value : '') })
 
@@ -210,12 +216,18 @@ function setupBack() {
 function navigate(destination) {
   if (busy.value) return
   error.value = ''
-  preview.value = ''
   login.value = null
   settingsFromResult.value = false
   page.value = destination
   if (destination === 'accounts') loadAccounts()
   if (destination === 'settings') Object.assign(changes, settings)
+}
+
+function closeDraft() {
+  media.value = null
+  map.id = ''
+  preview.value = ''
+  error.value = ''
 }
 
 function openLogin(platform) {
@@ -235,7 +247,7 @@ function logout(platform) {
   run('account', '', async () => {
     await invoke('logout', { platform })
     accounts[platform] = ''
-    if (media.value?.platform === platform) media.value = null
+    if (media.value?.platform === platform) closeDraft()
     showToast('已退出登录')
   })
 }
@@ -247,7 +259,7 @@ function saveSettings() {
     Object.assign(changes, saved)
     if (settingsFromResult.value && saved.gameDir) {
       settingsFromResult.value = false
-      page.value = 'result'
+      page.value = 'home'
     }
     showToast('设置已保存')
   })
@@ -267,6 +279,7 @@ function showToast(message, path = '') {
 function parse() {
   run('resolve', '正在解析链接', async () => {
     const result = await invoke('resolve_media', { url: sourceUrl.value })
+    resultScrollTop = 0
     media.value = result
     preview.value = ''
     exportPath.value = ''
@@ -283,7 +296,6 @@ function parse() {
       quality: pickQuality(result, settings), version: settings.version, mapper: settings.mapper, bpm: null,
       preview: result.preview, shift: 0,
     })
-    page.value = 'result'
     if (result.qualities.length) void analyzeAudio(result.id)
   })
 }
@@ -415,8 +427,8 @@ async function openExport(path) {
       <aside v-if="initialized" class="sidebar">
         <nav aria-label="主导航">
           <button v-for="item in navigation" :key="item.id" type="button" class="nav-link"
-            :class="{ selected: item.id === page || (item.id === 'home' && page === 'result') }"
-            :aria-current="item.id === page || (item.id === 'home' && page === 'result') ? 'page' : undefined"
+            :class="{ selected: item.id === page }"
+            :aria-current="item.id === page ? 'page' : undefined"
             :disabled="!!busy" @click="navigate(item.id)">
             <component :is="item.icon" :size="18" :stroke-width="2" />{{ item.name }}
           </button>
@@ -483,7 +495,7 @@ async function openExport(path) {
           </footer>
         </section>
 
-        <section v-else-if="page === 'home'" class="home">
+        <section v-else-if="page === 'home' && !media" class="home">
           <div class="home-surface">
             <div class="home-symbol" aria-hidden="true"><AudioLines :size="37" :stroke-width="1.6" /></div>
             <h1>从一首歌开始制谱</h1>
@@ -506,8 +518,8 @@ async function openExport(path) {
           </div>
         </section>
 
-        <section v-else-if="page === 'result' && media" class="page result-page">
-          <button type="button" class="text-button back-button" :disabled="!!busy" @click="navigate('home')"><ArrowLeft :size="17" /> 返回首页</button>
+        <section v-if="initialized && media" v-show="resultVisible" class="page result-page">
+          <button type="button" class="text-button back-button" :disabled="!!busy" @click="closeDraft"><ArrowLeft :size="17" /> 返回首页</button>
           <form @submit.prevent="exportMap">
             <div class="media-summary">
               <button class="cover-button" type="button" :disabled="!!busy" aria-label="替换封面" title="替换封面" @click="chooseCover">
@@ -537,7 +549,7 @@ async function openExport(path) {
               </select>
               <p v-else class="muted">没有可用的完整音轨。登录账号或更换链接后重新解析。</p>
               <PreviewPlayer :key="`${map.id}:${map.shift}`" :range="map.preview" :track-duration="trackDuration"
-                :src="preview" :loading="busy === 'preview'" :disabled="!!busy" :can-play="!!map.quality"
+                :src="preview" :loading="busy === 'preview'" :disabled="!!busy" :can-play="!!map.quality" :active="resultVisible"
                 @update:range="updatePreviewRange" @load="playPreview" />
               <p v-if="busy === 'preview'" class="muted preview-status" role="status">{{ progress }}</p>
               <div class="alignment-controls">
@@ -600,7 +612,7 @@ async function openExport(path) {
           </form>
         </section>
 
-        <section v-else-if="page === 'accounts'" class="page">
+        <section v-if="initialized && !login && page === 'accounts'" class="page">
           <div class="page-title"><h1>{{ heading }}</h1><p class="muted">管理用于解析和下载音轨的平台账号。</p></div>
           <div class="panel account-list">
             <div v-for="platform in platforms" :key="platform.id" class="account-row">
@@ -617,7 +629,7 @@ async function openExport(path) {
           <p v-if="error || accountsError" class="inline-error" role="alert">{{ error || accountsError }}</p>
         </section>
 
-        <section v-else-if="page === 'settings'" class="page">
+        <section v-else-if="initialized && !login && page === 'settings'" class="page">
           <div class="page-title"><h1>{{ heading }}</h1><p class="muted">配置游戏目录和新谱面的默认选项。</p></div>
           <form class="settings-form" @submit.prevent="saveSettings">
             <div class="panel settings-panel">
