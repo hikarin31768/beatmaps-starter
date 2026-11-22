@@ -28,7 +28,12 @@
     }
   },
   "plugins": {
-    "updater": { "pubkey": "" }
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4Mjc3MTAwMDBDNjhDODQKUldTRWpNWUFBSEVuT0FOcGM4RFI2bWJBdmJZd29WUEdYUmVUN2VOUE9OcXV2eDRNS3UzSmdyaEQK",
+      "endpoints": [
+        "https://github.com/hikarin31768/beatmaps-starter/releases/latest/download/latest.json"
+      ]
+    }
   },
   "bundle": {
     "active": false,

@@ -1,4 +1,4 @@
-name: Build Windows pre-release
+name: Build Windows releases
 
 on:
   push:
@@ -13,6 +13,33 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+
+      - name: Select release channel
+        id: channel
+        shell: pwsh
+        env:
+          ACTION_REF: ${{ github.ref }}
+          ACTION_REF_NAME: ${{ github.ref_name }}
+          ACTION_RUN_NUMBER: ${{ github.run_number }}
+          ACTION_SHA: ${{ github.sha }}
+        run: |
+          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $isStable = $env:ACTION_REF -match '^refs/tags/v\d+\.\d+\.\d+$'
+          if ($isStable) {
+            $tag = $env:ACTION_REF_NAME
+            if ($tag -ne "v$($config.version)") {
+              throw "Stable tag $tag must match tauri.conf.json version v$($config.version)."
+            }
+            $name = "Beatmaps Starter $tag"
+          } else {
+            $tag = "pre-$($env:ACTION_RUN_NUMBER)-$($env:ACTION_SHA)"
+            $name = "Pre-release $($env:ACTION_SHA)"
+          }
+          $channel = if ($isStable) { 'false' } else { 'true' }
+          "release_tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "release_name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$channel" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "make_latest=$($isStable.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -44,20 +71,33 @@ jobs:
         shell: msys2 {0}
         run: bash scripts/build-ffmpeg.sh
 
-      - name: Build the Windows installer
+      - name: Build the signed Windows installer
         run: npm run package:windows
+        env:
+          BEATMAPS_UPDATE_ENDPOINT: https://github.com/hikarin31768/beatmaps-starter/releases/latest/download/latest.json
+          BEATMAPS_UPDATE_PUBKEY: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4Mjc3MTAwMDBDNjhDODQKUldTRWpNWUFBSEVuT0FOcGM4RFI2bWJBdmJZd29WUEdYUmVUN2VOUE9OcXV2eDRNS3UzSmdyaEQK
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
-      - name: Publish this commit as a pre-release
+      - name: Create updater manifest
+        run: node scripts/create-updater-manifest.mjs
+        env:
+          RELEASE_TAG: ${{ steps.channel.outputs.release_tag }}
+
+      - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: pre-${{ github.run_number }}-${{ github.sha }}
-          name: Pre-release ${{ github.sha }}
+          tag_name: ${{ steps.channel.outputs.release_tag }}
+          name: ${{ steps.channel.outputs.release_name }}
           body: |
-            Automated Windows installer for commit `${{ github.sha }}`.
+            Windows installer and signed updater package for Beatmaps Starter.
 
-            This is a pre-release build generated for each pushed commit.
-          prerelease: true
-          make_latest: false
-          files: src-tauri/target/release/bundle/nsis/*-setup.exe
+            Commit: `${{ github.sha }}`
+          prerelease: ${{ steps.channel.outputs.prerelease }}
+          make_latest: ${{ steps.channel.outputs.make_latest }}
+          files: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*.nsis.zip
+            src-tauri/target/release/bundle/nsis/*.nsis.zip.sig
+            latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

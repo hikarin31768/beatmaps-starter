@@ -92,10 +92,16 @@ writeFileSync(join(notices, 'Upstream.txt'), [
 ].join('\n') + '\n')
 
 const config = join(runtime, 'bundle.windows.json')
+const updaterConfig = JSON.parse(readFileSync(join(root, 'src-tauri', 'tauri.conf.json'), 'utf8')).plugins.updater
+const updateEndpoint = process.env.BEATMAPS_UPDATE_ENDPOINT?.trim()
+  || updaterConfig.endpoints?.[0]
 const updatePubkey = process.env.BEATMAPS_UPDATE_PUBKEY?.trim()
-const updaterEnabled = Boolean(process.env.BEATMAPS_UPDATE_ENDPOINT?.trim() && updatePubkey)
+  || updaterConfig.pubkey
+const updaterEnabled = Boolean(
+  process.env.TAURI_SIGNING_PRIVATE_KEY?.trim() && updateEndpoint && updatePubkey,
+)
 writeFileSync(config, JSON.stringify({
-  ...(updaterEnabled && { plugins: { updater: { pubkey: updatePubkey } } }),
+  plugins: { updater: { pubkey: updatePubkey, endpoints: [updateEndpoint] } },
   bundle: {
     active: true,
     createUpdaterArtifacts: updaterEnabled,
