@@ -42,6 +42,7 @@ if (!process.env.BEATMAPS_FFMPEG && !ffmpegInfo.includes('-beatmaps-starter-audi
 if (!capture(ffmpeg, ['-hide_banner', '-h', 'encoder=libvorbis']).includes('Encoder libvorbis')
   || !capture(ffmpeg, ['-hide_banner', '-h', 'encoder=flac']).includes('Encoder flac')
   || !capture(ffmpeg, ['-hide_banner', '-h', 'filter=adelay']).includes('Filter adelay')
+  || !capture(ffmpeg, ['-hide_banner', '-h', 'filter=apad']).includes('Filter apad')
   || !capture(ffmpeg, ['-hide_banner', '-h', 'filter=ebur128']).includes('Filter ebur128')) {
   throw new Error('请提供支持 Vorbis、FLAC、音频偏移和 ebur128 的 FFmpeg Windows 版本。')
 }

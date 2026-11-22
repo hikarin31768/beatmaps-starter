@@ -226,7 +226,8 @@ svg { flex: none; }
 .platform-card.connected { border-color: var(--success); box-shadow: 0 0 14px color-mix(in srgb, var(--success) 21%, transparent); }
 .platform-card .muted { display: flex; justify-content: center; align-items: center; gap: 5px; max-width: 100%; overflow-wrap: anywhere; font-size: 12px; }
 .platform-card.connected .muted { color: var(--success); }
-.wizard-fields { width: min(100%, 620px); grid-template-columns: repeat(3, 1fr); margin-top: 14px; text-align: left; }
+.wizard-fields { width: min(100%, 620px); grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 14px; text-align: left; }
+.wizard-offsets { grid-column: 1 / -1; }
 
 .page { width: min(100%, 918px); padding: 38px clamp(25px, 4vw, 48px); margin: 0 auto; }
 .page-title { display: grid; gap: 7px; margin-bottom: 24px; }
@@ -298,6 +299,8 @@ svg { flex: none; }
 .fixed-lead-editor { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
 .fixed-lead-editor input { width: 104px; min-height: 32px; }
 .fixed-lead-editor .button { min-height: 32px; }
+.tail-offset { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.tail-offset input { width: 104px; min-height: 32px; }
 .alignment-controls .alignment-suggested:not(:disabled) { color: var(--accent-text); border-color: var(--accent-text); background: var(--accent-soft); }
 .alignment-controls .button[aria-pressed="true"] { color: var(--accent-ink); border-color: var(--accent); background: var(--accent); }
 .export-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding-top: 3px; }
@@ -313,6 +316,25 @@ svg { flex: none; }
 .account-status.signed-in { color: var(--success); }
 .account-row .button { min-width: 94px; min-height: 37px; padding: 0 11px; font-size: 13px; }
 .account-list + .inline-error { margin-top: 13px; }
+.history-status { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.history-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+.history-heading .button { min-height: 34px; padding: 0 10px; }
+.history-list { display: grid; gap: 10px; padding: 0; margin: 12px 0 0; list-style: none; }
+.history-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 10px 13px; }
+.history-card img { display: block; width: 64px; height: 64px; border-radius: 7px; object-fit: cover; }
+.history-info { display: grid; gap: 4px; overflow-wrap: anywhere; }
+.history-info time { font-size: 12px; }
+.history-info > span { font-size: 13px; }
+.history-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.history-select { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+.history-select input { width: 16px; height: 16px; min-height: 0; margin: 0; padding: 0; accent-color: var(--accent-text); }
+.history-selected { border-color: var(--accent-text); }
+.history-batch-delete { color: var(--danger); }
+.history-view { color: var(--success); border-color: var(--success); }
+.history-delete { color: var(--danger); border-color: var(--danger); }
+.history-view:not(:disabled):hover { color: var(--success); }
+.history-delete:not(:disabled):hover { color: var(--danger); }
+.history-actions .icon-button:disabled { opacity: .55; }
 .settings-form { display: grid; gap: 14px; }
 .settings-panel { padding: 6px 17px; }
 .settings-panel h2 { margin: 11px 0 7px; }
@@ -321,6 +343,10 @@ svg { flex: none; }
 .settings-row > span:last-child { text-align: right; }
 .settings-row input, .settings-row select { min-height: 39px; }
 .settings-row .button { min-height: 39px; }
+.offset-defaults { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.offset-default { display: grid; gap: 6px; font-size: 13px; }
+.offset-value-unit { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.offset-value-unit select { width: auto; }
 .save-button { justify-self: end; }
 
 .login-page { width: min(100%, 918px); min-height: 100%; display: flex; flex-direction: column; margin: 0 auto; padding: 25px clamp(28px, 5vw, 55px); }

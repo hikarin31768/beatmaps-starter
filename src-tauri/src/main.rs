@@ -2,6 +2,7 @@
 
 mod accounts;
 mod discovery;
+mod history;
 mod media;
 mod platform;
 mod state;
@@ -21,8 +22,11 @@ fn load_settings(state: tauri::State<'_, State>) -> Result<Settings> {
 
 #[tauri::command]
 fn save_settings(mut settings: Settings, state: tauri::State<'_, State>) -> Result<Settings> {
-    if !settings.lead_in.is_finite() || settings.lead_in < 0.0 {
-        return Err("默认音频偏移必须是大于或等于 0 的秒数".into());
+    if [settings.lead_in, settings.tail_offset]
+        .iter()
+        .any(|offset| !offset.is_finite() || *offset < 0.0)
+    {
+        return Err("默认前后偏移必须是大于或等于 0 的数字".into());
     }
     settings.game_dir = settings.game_dir.trim().to_owned();
     if !settings.game_dir.is_empty() {
@@ -181,6 +185,9 @@ fn main() {
             media::analyze_audio,
             media::preview_audio,
             media::export_map,
+            history::list_history,
+            history::save_history,
+            history::delete_history,
             updates::check_update,
             updates::install_update,
         ])

@@ -86,6 +86,7 @@ function startDrag(point, event) {
   const target = event.currentTarget
   target.setPointerCapture(event.pointerId)
   drag = { point, target, id: event.pointerId, x: event.clientX, time: props.range[point], secondsPerPixel: duration.value / width, snapped: false }
+  previewEnd = null
   if (event.ctrlKey) snapDrag()
 }
 
@@ -147,7 +148,7 @@ function playFrom(player, time) {
 
 function endForPosition(time) {
   const end = Math.min(props.range.end, duration.value)
-  return props.range.start <= time && time < end ? end : null
+  return !drag && props.range.start <= time && time < end ? end : null
 }
 
 function toggle() {

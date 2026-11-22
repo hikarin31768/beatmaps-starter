@@ -6,21 +6,24 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
   ArrowDownToLine, ArrowLeft, ArrowRight, AudioLines, Check, ChevronDown, ChevronRight, ChevronUp, FileImage, Folder,
-  FolderOpen, House, Link2, LoaderCircle, Minus, Pencil, Settings2, Square, UserRound, X,
+  Eye, FolderOpen, History, House, Link2, LoaderCircle, Minus, Pencil, Settings2, Square, Trash2, UserRound, X,
 } from 'lucide-vue-next'
 import LoginPage from './components/LoginPage.vue'
+import OffsetDefaults from './components/OffsetDefaults.vue'
 import PlatformIcon from './components/PlatformIcon.vue'
 import PreviewPlayer from './components/PreviewPlayer.vue'
 import { durationText, pickQuality, platforms } from './platforms'
 
 const navigation = [
   { id: 'home', name: '首页', icon: House },
+  { id: 'history', name: '历史', icon: History },
   { id: 'accounts', name: '账号', icon: UserRound },
   { id: 'settings', name: '设置', icon: Settings2 },
 ]
 const steps = ['游戏目录', '流媒体账号', '谱面偏好']
 const settings = reactive({
   initialized: false, gameDir: '', theme: 'dark', version: 'legacy', mapper: '', leadIn: 2,
+  leadInUnit: 'seconds', tailOffset: 2, tailOffsetUnit: 'seconds',
   ...Object.fromEntries(platforms.map(({ qualityKey, qualities }) => [qualityKey, qualities[0][0]])),
 })
 const changes = reactive({})
@@ -37,6 +40,15 @@ const login = ref(null)
 const sourceUrl = ref('')
 const media = ref(null)
 const map = reactive({})
+const draftUrl = ref('')
+const historyId = ref('')
+const customCover = ref(false)
+const historyEntries = ref([])
+const loadingHistory = ref(false)
+const historyError = ref('')
+const historySaveError = ref('')
+const selectingHistory = ref(false)
+const selectedHistoryIds = ref([])
 const editing = ref(false)
 const preview = ref('')
 const previewSource = ref(null)
@@ -65,21 +77,63 @@ const effectiveTheme = computed(() => settings.theme === 'system' ? (systemDark.
 const initialized = computed(() => settings.initialized)
 const resultVisible = computed(() => page.value === 'home' && !login.value && !!media.value)
 const sourcePlatform = computed(() => platforms.find(({ id }) => id === media.value?.platform))
-const trackDuration = computed(() => (media.value?.duration || media.value?.preview.end || 0) + (map.shift || 0))
-const canAlign = computed(() => analysis.value?.firstBeat != null && map.bpm >= 1 && map.bpm <= 1000)
+const hasBpm = computed(() => Number.isFinite(map.bpm) && map.bpm >= 1 && map.bpm <= 1000)
+const canAlign = computed(() => analysis.value?.firstBeat != null && hasBpm.value)
+const validTail = computed(() => Number.isFinite(map.tailOffset) && map.tailOffset >= 0)
+const tailSeconds = computed(() => validTail.value ? offsetInSeconds(map.tailOffset, map.tailOffsetUnit) : 0)
+const tailBeats = computed({
+  get: () => map.tailOffset == null || !hasBpm.value ? '' : map.tailOffsetUnit === 'beats'
+    ? map.tailOffset : Number(beatsFor(tailSeconds.value).toFixed(3)),
+  set: value => {
+    map.tailOffset = value === '' ? null : value
+    map.tailOffsetUnit = 'beats'
+  },
+})
+const trackDuration = computed(() => media.value
+  ? (media.value.duration || media.value.preview.end) + (map.shift || 0) + tailSeconds.value
+  : 0)
 const canDoubleBpm = computed(() => Number.isFinite(Number(map.bpm)) && Number(map.bpm) >= 1 && Number(map.bpm) <= 500)
 const canHalveBpm = computed(() => Number.isFinite(Number(map.bpm)) && Number(map.bpm) >= 2 && Number(map.bpm) <= 1000)
 const currentLeadIn = computed(() => analysis.value ? Math.max(0, analysis.value.leading + map.shift) : null)
-const fixedLeadTarget = computed(() => fixedLeadOverride.value ?? settings.leadIn)
+const currentLeadBeats = computed(() => currentLeadIn.value != null && hasBpm.value ? beatsFor(currentLeadIn.value) : null)
+const fixedLeadTarget = computed(() => fixedLeadOverride.value ?? { value: settings.leadIn, unit: settings.leadInUnit })
 const validFixedLead = computed(() => Number.isFinite(fixedLeadInput.value) && fixedLeadInput.value >= 0)
-const seconds = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 })
+const beatValue = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 })
 const offsetSeconds = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3, signDisplay: 'always' })
+const historyDate = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' })
+const allHistorySelected = computed(() => historyEntries.value.length > 0
+  && selectedHistoryIds.value.length === historyEntries.value.length)
+const historyDraft = computed(() => {
+  if (!historyId.value || !media.value) return null
+  const { title, subtitle, artist, mapper, bpm, version, quality, preview, shift, tailOffset, tailOffsetUnit } = map
+  return {
+    id: historyId.value,
+    url: draftUrl.value,
+    cover: media.value.thumbnail,
+    customCover: customCover.value,
+    form: {
+      title, subtitle, artist, mapper, bpm: Number.isFinite(bpm) ? bpm : null, version, quality,
+      preview, previewSource: previewSource.value, shift, alignment: alignment.value,
+      fixedLead: fixedLeadOverride.value,
+      editingFixedLead: editingFixedLead.value,
+      fixedLeadInput: editingFixedLead.value && Number.isFinite(fixedLeadInput.value) ? fixedLeadInput.value : null,
+      tailOffset: Number.isFinite(tailOffset) ? tailOffset : null, tailOffsetUnit,
+    },
+  }
+})
 const heading = computed(() => navigation.find(({ id }) => id === page.value)?.name)
+const pendingHistory = new Map()
+let historyWriter = null
 let resultScrollTop = 0
 let releaseProgress
 let toastTimer
 
 function syncTheme(event) { systemDark.value = event.matches }
+function beatsFor(time) { return time * map.bpm / 60 }
+function offsetInSeconds(value, unit) {
+  return unit === 'beats' ? (hasBpm.value ? value * 60 / map.bpm : 0) : value
+}
+
 function adjustBpm(multiplier) {
   const bpm = Number(map.bpm)
   if (!Number.isFinite(bpm) || bpm < 1 || bpm > 1000) return
@@ -93,8 +147,21 @@ watch([page, step, login, resultVisible], async ([, , , visible], [, , , wasVisi
   await nextTick()
   scroll.value?.scrollTo(0, resultVisible.value ? resultScrollTop : 0)
 })
-watch(() => map.shift, () => { preview.value = '' })
-watch(() => map.bpm, () => { if (alignment.value) applyAlignment(canAlign.value ? alignment.value : '') })
+watch([() => map.shift, tailSeconds], () => { preview.value = '' })
+watch(tailSeconds, () => {
+  if (media.value && map.preview.end > trackDuration.value) alignPreviewRange()
+})
+watch(() => map.bpm, () => {
+  if (analysis.value && alignment.value) applyAlignment(canAlign.value ? alignment.value : '')
+})
+watch(historyDraft, draft => {
+  if (!draft) return
+  pendingHistory.set(draft.id, draft)
+  void flushHistory()
+})
+watch(page, destination => {
+  if (destination !== 'history') setHistorySelection(false)
+})
 
 onMounted(async () => {
   osDark.addEventListener('change', syncTheme)
@@ -201,7 +268,9 @@ function setupNext() {
       step.value += 1
       return
     }
-    if (!Number.isFinite(settings.leadIn) || settings.leadIn < 0) throw new Error('默认音频偏移必须是大于或等于 0 的秒数')
+    if ([settings.leadIn, settings.tailOffset].some(value => !Number.isFinite(value) || value < 0)) {
+      throw new Error('默认前后偏移必须是大于或等于 0 的数字')
+    }
     const saved = await invoke('save_settings', { settings: { ...settings, gameDir: gameDir.value, initialized: true } })
     Object.assign(settings, saved)
     Object.assign(changes, saved)
@@ -220,14 +289,101 @@ function navigate(destination) {
   settingsFromResult.value = false
   page.value = destination
   if (destination === 'accounts') loadAccounts()
+  if (destination === 'history') void loadHistory()
   if (destination === 'settings') Object.assign(changes, settings)
 }
 
 function closeDraft() {
+  historyId.value = ''
   media.value = null
   map.id = ''
   preview.value = ''
   error.value = ''
+}
+
+async function writeHistory() {
+  while (pendingHistory.size) {
+    const [id, payload] = pendingHistory.entries().next().value
+    pendingHistory.delete(id)
+    try {
+      await invoke('save_history', { payload })
+      historySaveError.value = ''
+    } catch (reason) {
+      historySaveError.value = String(reason)
+    }
+  }
+}
+
+function flushHistory() {
+  if (!historyWriter && pendingHistory.size) {
+    historyWriter = writeHistory().finally(() => {
+      historyWriter = null
+      return flushHistory()
+    })
+  }
+  return historyWriter
+}
+
+async function closeWindow() {
+  await nextTick()
+  await flushHistory()
+  await desktop?.close()
+}
+
+async function loadHistory() {
+  if (loadingHistory.value) return
+  loadingHistory.value = true
+  historyError.value = ''
+  try {
+    await nextTick()
+    await flushHistory()
+    historyEntries.value = await invoke('list_history')
+    const existing = new Set(historyEntries.value.map(entry => entry.id))
+    selectedHistoryIds.value = selectedHistoryIds.value.filter(id => existing.has(id))
+  } catch (reason) {
+    historyError.value = String(reason)
+  } finally {
+    loadingHistory.value = false
+  }
+}
+
+function openHistory(entry) {
+  if (media.value && historyId.value === entry.id) {
+    navigate('home')
+    return
+  }
+  run('history-open', '正在恢复编辑', async () => {
+    await flushHistory()
+    await openDraft(entry.url, entry)
+  })
+}
+
+function setHistorySelection(enabled) {
+  selectingHistory.value = enabled
+  selectedHistoryIds.value = []
+}
+
+function toggleAllHistory(event) {
+  selectedHistoryIds.value = event.target.checked ? historyEntries.value.map(entry => entry.id) : []
+}
+
+function deleteHistory(ids) {
+  if (!ids.length) return
+  run('history-delete', '', async () => {
+    const deleted = new Set(ids)
+    const activeId = deleted.has(historyId.value) ? historyId.value : ''
+    if (activeId) historyId.value = ''
+    try {
+      await flushHistory()
+      await invoke('delete_history', { ids })
+      historyEntries.value = historyEntries.value.filter(entry => !deleted.has(entry.id))
+      selectedHistoryIds.value = selectedHistoryIds.value.filter(id => !deleted.has(id))
+      if (!historyEntries.value.length) setHistorySelection(false)
+    } catch (reason) {
+      if (activeId) historyId.value = activeId
+      throw reason
+    }
+  })
 }
 
 function openLogin(platform) {
@@ -277,37 +433,50 @@ function showToast(message, path = '') {
 }
 
 function parse() {
-  run('resolve', '正在解析链接', async () => {
-    const result = await invoke('resolve_media', { url: sourceUrl.value })
-    resultScrollTop = 0
-    media.value = result
-    preview.value = ''
-    exportPath.value = ''
-    editing.value = false
-    analysis.value = null
-    analysisError.value = ''
-    analyzing.value = false
-    alignment.value = ''
-    fixedLeadOverride.value = null
-    editingFixedLead.value = false
-    previewSource.value = result.preview
-    Object.assign(map, {
-      id: result.id, title: result.title, subtitle: '', artist: result.artist,
-      quality: pickQuality(result, settings), version: settings.version, mapper: settings.mapper, bpm: null,
-      preview: result.preview, shift: 0,
-    })
-    if (result.qualities.length) void analyzeAudio(result.id)
-  })
+  run('resolve', '正在解析链接', () => openDraft(sourceUrl.value.trim()))
 }
 
-async function analyzeAudio(id) {
+async function openDraft(url, entry = null) {
+  const result = await invoke('resolve_media', { url, historyId: entry?.id ?? null })
+  const saved = entry?.form
+  resultScrollTop = 0
+  media.value = result
+  historyId.value = entry?.id ?? result.id
+  draftUrl.value = url
+  sourceUrl.value = url
+  customCover.value = entry?.customCover ?? false
+  preview.value = ''
+  exportPath.value = ''
+  editing.value = false
+  analysis.value = null
+  analysisError.value = ''
+  analyzing.value = false
+  alignment.value = saved?.alignment ?? ''
+  fixedLeadOverride.value = saved?.fixedLead ?? null
+  editingFixedLead.value = saved?.editingFixedLead ?? false
+  fixedLeadInput.value = saved?.fixedLeadInput ?? ''
+  previewSource.value = saved?.previewSource ?? result.preview
+  Object.assign(map, {
+    id: result.id, title: saved?.title ?? result.title, subtitle: saved?.subtitle ?? '', artist: saved?.artist ?? result.artist,
+    quality: result.qualities.some(item => item.id === saved?.quality) ? saved.quality : pickQuality(result, settings),
+    version: saved?.version ?? settings.version, mapper: saved?.mapper ?? settings.mapper, bpm: saved?.bpm ?? null,
+    preview: saved?.preview ?? result.preview, shift: saved?.shift ?? 0,
+    tailOffset: saved ? saved.tailOffset : settings.tailOffset,
+    tailOffsetUnit: saved?.tailOffsetUnit ?? settings.tailOffsetUnit,
+  })
+  if (map.preview.end > trackDuration.value) alignPreviewRange()
+  page.value = 'home'
+  if (result.qualities.length) void analyzeAudio(result.id, saved?.bpm == null)
+}
+
+async function analyzeAudio(id, fillBpm = true) {
   analyzing.value = true
   analysisError.value = ''
   try {
     const result = await invoke('analyze_audio', { id })
     if (id === map.id) {
       analysis.value = result
-      if (!map.bpm) map.bpm = result.bpm
+      if (fillBpm && !map.bpm) map.bpm = result.bpm
     }
   } catch (reason) {
     if (id === map.id) analysisError.value = String(reason)
@@ -319,11 +488,13 @@ async function analyzeAudio(id) {
 function applyAlignment(mode) {
   let shift = 0
   if (mode && canAlign.value) {
+    if (mode === 'fixed' && !fixedLeadOverride.value) fixedLeadOverride.value = fixedLeadTarget.value
     const { leading, firstBeat } = analysis.value
     const period = 60 / map.bpm
     const beatIndex = mode === 'minimum'
       ? Math.ceil(firstBeat / period - 1e-9)
-      : Math.max(Math.ceil((firstBeat - leading) / period - 1e-9), Math.round((fixedLeadTarget.value + firstBeat - leading) / period))
+      : Math.max(Math.ceil((firstBeat - leading) / period - 1e-9),
+        Math.round((offsetInSeconds(fixedLeadTarget.value.value, fixedLeadTarget.value.unit) + firstBeat - leading) / period))
     shift = beatIndex * period - firstBeat
     if (Math.abs(shift) < 1e-8) shift = 0
   }
@@ -331,13 +502,20 @@ function applyAlignment(mode) {
   if (mode !== 'fixed') editingFixedLead.value = false
   if (shift === map.shift) return
   map.shift = shift
-  const end = Math.min(trackDuration.value, previewSource.value.end + shift)
-  const start = Math.max(0, previewSource.value.start + shift)
+  alignPreviewRange()
+}
+
+function alignPreviewRange() {
+  const end = Math.min(trackDuration.value, previewSource.value.end + map.shift)
+  const start = Math.max(0, previewSource.value.start + map.shift)
   map.preview = end > start ? { start, end } : { start: 0, end: Math.min(trackDuration.value, 10) }
 }
 
 async function editFixedLead() {
-  if (!editingFixedLead.value) fixedLeadInput.value = fixedLeadTarget.value
+  if (!editingFixedLead.value) {
+    const { value, unit } = fixedLeadTarget.value
+    fixedLeadInput.value = Number(beatsFor(offsetInSeconds(value, unit)).toFixed(3))
+  }
   editingFixedLead.value = true
   await nextTick()
   fixedLeadField.value?.focus()
@@ -351,7 +529,7 @@ async function closeFixedLeadEditor() {
 
 function saveFixedLead() {
   if (!validFixedLead.value || !canAlign.value || busy.value) return
-  fixedLeadOverride.value = fixedLeadInput.value
+  fixedLeadOverride.value = { value: fixedLeadInput.value, unit: 'beats' }
   applyAlignment('fixed')
   void closeFixedLeadEditor()
 }
@@ -375,21 +553,24 @@ function chooseCover() {
       multiple: false, title: '替换谱面封面',
       filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
     })
-    if (path) media.value.cover = await invoke('replace_cover', { id: map.id, path })
+    if (path) {
+      Object.assign(media.value, await invoke('replace_cover', { id: map.id, path }))
+      customCover.value = true
+    }
   })
 }
 
 function playPreview() {
   run('preview', '正在准备试听', async () => {
     const { id, shift } = map
-    const path = await invoke('preview_audio', { id, shift })
+    const path = await invoke('preview_audio', { id, shift, tailSeconds: tailSeconds.value })
     preview.value = convertFileSrc(path)
   })
 }
 
 function exportMap() {
   run('export', '正在导出', async () => {
-    const path = await invoke('export_map', { payload: { ...map, bpm: Number(map.bpm) } })
+    const path = await invoke('export_map', { payload: { ...map, bpm: Number(map.bpm), tailSeconds: tailSeconds.value } })
     exportPath.value = path
     showToast('谱面导出成功', path)
   })
@@ -411,7 +592,7 @@ async function openExport(path) {
       <div class="window-controls" @dblclick.stop>
         <button class="window-button" type="button" title="最小化" aria-label="最小化" @click="desktop?.minimize()"><Minus :size="15" /></button>
         <button class="window-button" type="button" title="最大化或还原" aria-label="最大化或还原" @click="desktop?.toggleMaximize()"><Square :size="12" /></button>
-        <button class="window-button window-close" type="button" title="关闭" aria-label="关闭" @click="desktop?.close()"><X :size="17" /></button>
+        <button class="window-button window-close" type="button" title="关闭" aria-label="关闭" @click="closeWindow"><X :size="17" /></button>
       </div>
     </header>
 
@@ -481,7 +662,8 @@ async function openExport(path) {
               <div class="fields wizard-fields">
                 <label class="field">默认谱面版本<select v-model="settings.version"><option value="legacy">V2 / V3</option><option value="v4">V4</option></select></label>
                 <label class="field">谱师<input v-model="settings.mapper" maxlength="120" placeholder="填写谱师名称" /></label>
-                <label class="field">默认音频偏移（秒）<input v-model.number="settings.leadIn" type="number" min="0" step="any" required /></label>
+                <OffsetDefaults class="wizard-offsets" v-model:lead-in="settings.leadIn" v-model:lead-in-unit="settings.leadInUnit"
+                  v-model:tail-offset="settings.tailOffset" v-model:tail-offset-unit="settings.tailOffsetUnit" :disabled="!!busy" />
               </div>
             </template>
             <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
@@ -548,16 +730,16 @@ async function openExport(path) {
                 <option v-for="item in media.qualities" :key="item.id" :value="item.id">{{ item.label }}</option>
               </select>
               <p v-else class="muted">没有可用的完整音轨。登录账号或更换链接后重新解析。</p>
-              <PreviewPlayer :key="`${map.id}:${map.shift}`" :range="map.preview" :track-duration="trackDuration"
+              <PreviewPlayer :key="`${map.id}:${map.shift}:${tailSeconds}`" :range="map.preview" :track-duration="trackDuration"
                 :src="preview" :loading="busy === 'preview'" :disabled="!!busy" :can-play="!!map.quality" :active="resultVisible"
                 @update:range="updatePreviewRange" @load="playPreview" />
               <p v-if="busy === 'preview'" class="muted preview-status" role="status">{{ progress }}</p>
               <div class="alignment-controls">
-                <span class="muted" aria-live="polite">音频偏移
+                <span class="muted" aria-live="polite">音频前偏移
                   <button v-if="alignment === 'fixed'" ref="fixedLeadButton" type="button" class="alignment-value"
-                    :disabled="!!busy || !canAlign" :aria-label="`调整固定偏移目标，当前 ${seconds.format(currentLeadIn)} 秒`" :aria-expanded="editingFixedLead"
-                    @click="editFixedLead">{{ seconds.format(currentLeadIn) }} 秒</button>
-                  <template v-else-if="currentLeadIn != null">{{ seconds.format(currentLeadIn) }} 秒</template>
+                    :disabled="!!busy || !canAlign" :aria-label="currentLeadBeats == null ? '调整固定前偏移' : `调整固定前偏移，当前 ${beatValue.format(currentLeadBeats)} 拍`"
+                    :aria-expanded="editingFixedLead" @click="editFixedLead">{{ currentLeadBeats == null ? '—' : `${beatValue.format(currentLeadBeats)} 拍` }}</button>
+                  <template v-else-if="currentLeadBeats != null">{{ beatValue.format(currentLeadBeats) }} 拍</template>
                   <span v-if="currentLeadIn != null" :class="{ 'offset-positive': map.shift > 0, 'offset-negative': map.shift < 0 }">（{{ offsetSeconds.format(map.shift) }} 秒）</span>
                 </span>
                 <button type="button" class="button secondary" :disabled="!!busy || !canAlign" :aria-pressed="alignment === 'minimum'"
@@ -567,12 +749,17 @@ async function openExport(path) {
                 <button v-if="alignment" type="button" class="text-button" :disabled="!!busy" @click="applyAlignment('')">还原</button>
               </div>
               <div v-if="editingFixedLead" class="fixed-lead-editor" @keydown.esc.prevent.stop="closeFixedLeadEditor">
-                <label for="fixed-lead">目标留白（秒）</label>
+                <label for="fixed-lead">目标前留白（拍）</label>
                 <input id="fixed-lead" ref="fixedLeadField" v-model.number="fixedLeadInput" type="number" min="0" step="any"
                   :disabled="!!busy" @keydown.enter.prevent="saveFixedLead" />
                 <button type="button" class="button primary" :disabled="!!busy || !validFixedLead || !canAlign" @click="saveFixedLead">保存</button>
                 <button type="button" class="text-button" :disabled="!!busy" @click="closeFixedLeadEditor">取消</button>
               </div>
+              <label class="tail-offset muted">音频后偏移
+                <input v-model.number="tailBeats" type="number" min="0" step="any" required
+                  aria-label="音频后偏移（拍）" placeholder="—" :disabled="!!busy || !hasBpm" />
+                <span>拍</span>
+              </label>
             </div>
 
             <div class="panel result-panel">
@@ -600,11 +787,12 @@ async function openExport(path) {
               <p v-else-if="analysis && !analysis.bpm" class="muted" role="status">未检测到稳定的节拍，请手动填写 BPM。</p>
             </div>
             <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
+            <p v-if="historySaveError" class="inline-error" role="alert">未能自动保存历史。{{ historySaveError }}</p>
             <div class="export-footer">
               <button v-if="!settings.gameDir" type="button" class="text-button" :disabled="!!busy" @click="configureForExport"><Folder :size="16" /> 设置游戏目录</button>
               <button v-else-if="exportPath" type="button" class="text-button" :disabled="!!busy" @click="openExport(exportPath)"><FolderOpen :size="16" /> 打开谱面目录</button>
               <span v-else class="muted"><Folder :size="16" /> CustomWIPLevels</span>
-              <button type="submit" class="button primary" :disabled="!!busy || analyzing || editingFixedLead || !map.quality || !map.bpm || !map.title.trim() || !settings.gameDir">
+              <button type="submit" class="button primary" :disabled="!!busy || analyzing || editingFixedLead || !map.quality || !hasBpm || !validTail || !map.title.trim() || !settings.gameDir">
                 <LoaderCircle v-if="busy === 'export'" class="spin" :size="18" /><ArrowDownToLine v-else :size="18" />
                 {{ busy === 'export' ? progress : '导出谱面' }}
               </button>
@@ -612,7 +800,53 @@ async function openExport(path) {
           </form>
         </section>
 
-        <section v-if="initialized && !login && page === 'accounts'" class="page">
+        <section v-if="initialized && !login && page === 'history'" class="page">
+          <div class="page-title history-heading">
+            <h1>{{ heading }}</h1>
+            <div v-if="historyEntries.length" class="history-actions">
+              <template v-if="selectingHistory">
+                <label class="history-select muted">
+                  <input type="checkbox" :checked="allHistorySelected" :indeterminate="!!selectedHistoryIds.length && !allHistorySelected"
+                    :disabled="!!busy || loadingHistory" @change="toggleAllHistory" /> 全选
+                </label>
+                <button class="button secondary history-batch-delete" type="button"
+                  :disabled="!!busy || loadingHistory || !selectedHistoryIds.length" @click="deleteHistory(selectedHistoryIds)">
+                  <Trash2 :size="16" /> 删除所选（{{ selectedHistoryIds.length }}）
+                </button>
+              </template>
+              <button class="button secondary" type="button" :disabled="!!busy || loadingHistory"
+                @click="setHistorySelection(!selectingHistory)">{{ selectingHistory ? '取消多选' : '多选' }}</button>
+            </div>
+          </div>
+          <p v-if="loadingHistory || busy === 'history-open'" class="history-status muted" role="status">
+            <LoaderCircle class="spin" :size="16" />{{ busy === 'history-open' ? progress : '正在读取历史' }}
+          </p>
+          <p v-if="error || historyError || historySaveError" class="inline-error" role="alert">{{ error || historyError || historySaveError }}</p>
+          <p v-else-if="!loadingHistory && !historyEntries.length" class="muted">暂无历史记录</p>
+          <ul v-if="historyEntries.length" class="history-list">
+            <li v-for="entry in historyEntries" :key="entry.id" class="panel history-card"
+              :class="{ 'history-selected': selectedHistoryIds.includes(entry.id) }">
+              <img :src="entry.cover" alt="" width="128" height="128" loading="lazy" />
+              <div class="history-info">
+                <time class="muted" :datetime="new Date(entry.createdAt).toISOString()">{{ historyDate.format(entry.createdAt) }}</time>
+                <strong>{{ [entry.form.title, entry.form.subtitle].filter(Boolean).join(' · ') || '未填写标题' }}</strong>
+                <span v-if="entry.form.artist" class="muted">{{ entry.form.artist }}</span>
+              </div>
+              <div class="history-actions">
+                <label v-if="selectingHistory" class="history-select">
+                  <input v-model="selectedHistoryIds" type="checkbox" :value="entry.id"
+                    :aria-label="`选择 ${entry.form.title || '未填写标题'}`" :disabled="!!busy || loadingHistory" />
+                </label>
+                <button type="button" class="icon-button history-view" aria-label="查看" title="查看"
+                  :disabled="!!busy || loadingHistory" @click="openHistory(entry)"><Eye :size="17" /></button>
+                <button type="button" class="icon-button history-delete" aria-label="删除" title="删除"
+                  :disabled="!!busy || loadingHistory" @click="deleteHistory([entry.id])"><Trash2 :size="17" /></button>
+              </div>
+            </li>
+          </ul>
+        </section>
+
+        <section v-else-if="initialized && !login && page === 'accounts'" class="page">
           <div class="page-title"><h1>{{ heading }}</h1><p class="muted">管理用于解析和下载音轨的平台账号。</p></div>
           <div class="panel account-list">
             <div v-for="platform in platforms" :key="platform.id" class="account-row">
@@ -663,7 +897,8 @@ async function openExport(path) {
               <h2>默认谱面信息</h2>
               <label class="settings-row">谱面版本<select v-model="changes.version" :disabled="!!busy"><option value="legacy">V2 / V3</option><option value="v4">V4</option></select></label>
               <label class="settings-row">谱师<input v-model="changes.mapper" maxlength="120" placeholder="填写谱师名称" :disabled="!!busy" /></label>
-              <label class="settings-row">默认音频偏移（秒）<input v-model.number="changes.leadIn" type="number" min="0" step="any" required :disabled="!!busy" /></label>
+              <OffsetDefaults class="settings-row" v-model:lead-in="changes.leadIn" v-model:lead-in-unit="changes.leadInUnit"
+                v-model:tail-offset="changes.tailOffset" v-model:tail-offset-unit="changes.tailOffsetUnit" :disabled="!!busy" />
             </div>
             <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
             <button type="submit" class="button primary save-button" :disabled="!!busy"><Check :size="18" /> 保存设置</button>

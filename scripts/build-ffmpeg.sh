@@ -64,7 +64,7 @@ bash "$sources/FFmpeg-n7.1.5/configure" \
   --enable-muxer=adts,flac,ipod,matroska,mp4,mpegts,ogg,wav,webm \
   --enable-parser=aac,aac_latm,ac3,flac,h264,mpegaudio,opus,vorbis \
   --enable-decoder=aac,aac_latm,ac3,alac,eac3,flac,mp3,mp3float,opus,vorbis,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le \
-  --enable-encoder=flac,libvorbis,pcm_f32le,pcm_f64le,pcm_s32le --enable-filter=adelay,aresample,asetpts,atrim,ebur128 \
+  --enable-encoder=flac,libvorbis,pcm_f32le,pcm_f64le,pcm_s32le --enable-filter=adelay,apad,aresample,asetpts,atrim,ebur128 \
   --enable-bsf=aac_adtstoasc,h264_mp4toannexb
 "$make_command" -r -j "${NUMBER_OF_PROCESSORS:-4}" ffmpeg.exe ffprobe.exe
 
@@ -108,8 +108,9 @@ write_le32() {
 dd if=/dev/zero bs="$smoke_data_size" count=1 status=none >> "$smoke_wav"
 
 "$ffmpeg" -v error -nostdin -y \
-  -i "$smoke_wav" -t 1 -vn \
-  -af ebur128=framelog=verbose -ar 44100 -ac 2 -c:a libvorbis "$work/smoke.ogg"
+  -i "$smoke_wav" -vn \
+  -af "apad=pad_len=$((sample_rate / 2)),ebur128=framelog=verbose" \
+  -ar 44100 -ac 2 -c:a libvorbis "$work/smoke.ogg"
 
 mkdir -p "$runtime/licenses"
 cp "$sources/FFmpeg-n7.1.5/COPYING.LGPLv2.1" "$runtime/licenses/FFmpeg-LICENSE.txt"

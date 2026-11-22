@@ -33,6 +33,14 @@ pub enum MapVersion {
     V4,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OffsetUnit {
+    #[default]
+    Seconds,
+    Beats,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -42,6 +50,9 @@ pub struct Settings {
     pub version: MapVersion,
     pub mapper: String,
     pub lead_in: f64,
+    pub lead_in_unit: OffsetUnit,
+    pub tail_offset: f64,
+    pub tail_offset_unit: OffsetUnit,
     pub netease_quality: String,
     pub bilibili_quality: String,
     pub youtube_quality: String,
@@ -56,6 +67,9 @@ impl Default for Settings {
             version: MapVersion::Legacy,
             mapper: String::new(),
             lead_in: 2.0,
+            lead_in_unit: OffsetUnit::Seconds,
+            tail_offset: 2.0,
+            tail_offset_unit: OffsetUnit::Seconds,
             netease_quality: DEFAULT_NETEASE_QUALITY.into(),
             bilibili_quality: DEFAULT_BILIBILI_QUALITY.into(),
             youtube_quality: DEFAULT_YOUTUBE_QUALITY.into(),
@@ -97,7 +111,7 @@ pub struct State {
     pub tools: PathBuf,
     pub dir: PathBuf,
     pub draft: AsyncMutex<Option<Draft>>,
-    storage: Mutex<()>,
+    pub(crate) storage: Mutex<()>,
 }
 
 impl State {
@@ -174,7 +188,7 @@ impl State {
     }
 }
 
-fn atomic_write(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     fs::create_dir_all(dir).map_err(|e| issue("无法创建应用数据目录", e))?;
     let mut tmp = NamedTempFile::new_in(dir).map_err(|e| issue("写入本地数据失败", e))?;
     tmp.write_all(bytes)

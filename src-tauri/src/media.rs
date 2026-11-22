@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use crate::{
-    discovery, emit_progress,
+    discovery, emit_progress, history,
     platform::{self, Metadata, Quality},
     state::{issue, MapVersion, Platform, Result, State},
     tempo, tools,
@@ -34,7 +34,7 @@ pub struct Draft {
     cover: Vec<u8>,
     cached_file: Option<(String, TempDir)>,
     lowest_file: Option<(String, TempDir)>,
-    preview_clip: Option<(f64, PreviewClip)>,
+    preview_clip: Option<(f64, f64, PreviewClip)>,
     analysis: Option<tempo::Analysis>,
 }
 
@@ -47,22 +47,29 @@ impl Draft {
         PreviewRange::new(self.metadata.chorus_start, self.metadata.duration)
     }
 
-    fn shifted_duration(&self, shift: f64) -> Result<f64> {
+    fn shifted_duration(&self, shift: f64, tail_seconds: f64) -> Result<f64> {
         let duration = self.metadata.duration;
-        if !shift.is_finite() || (duration > 0.0 && duration + shift <= 0.0) {
+        let total = duration + shift + tail_seconds;
+        if !shift.is_finite()
+            || !tail_seconds.is_finite()
+            || tail_seconds < 0.0
+            || !total.is_finite()
+            || (duration > 0.0 && duration + shift <= 0.0)
+        {
             return Err("音频偏移超出可调整范围".into());
         }
-        Ok(if duration > 0.0 {
-            duration + shift
-        } else {
-            0.0
-        })
+        Ok(if duration > 0.0 { total } else { 0.0 })
     }
 
-    fn selected_preview(&self, preview: Option<PreviewRange>, shift: f64) -> Result<PreviewRange> {
+    fn selected_preview(
+        &self,
+        preview: Option<PreviewRange>,
+        shift: f64,
+        tail_seconds: f64,
+    ) -> Result<PreviewRange> {
         preview
             .unwrap_or_else(|| self.preview())
-            .validate(self.shifted_duration(shift)?)
+            .validate(self.shifted_duration(shift, tail_seconds)?)
     }
 
     fn lowest_quality(&self) -> Result<String> {
@@ -152,13 +159,14 @@ pub struct MediaView {
     title: String,
     artist: String,
     cover: String,
+    thumbnail: String,
     duration: f64,
     preview: PreviewRange,
     qualities: Vec<Quality>,
 }
 
-impl From<&Draft> for MediaView {
-    fn from(draft: &Draft) -> Self {
+impl MediaView {
+    fn new(draft: &Draft, thumbnail: String) -> Self {
         let metadata = &draft.metadata;
         Self {
             id: draft.id.clone(),
@@ -166,6 +174,7 @@ impl From<&Draft> for MediaView {
             title: metadata.title.clone(),
             artist: metadata.artist.clone(),
             cover: cover_data(&draft.cover),
+            thumbnail,
             duration: metadata.duration,
             preview: draft.preview(),
             qualities: metadata.qualities.clone(),
@@ -176,15 +185,37 @@ impl From<&Draft> for MediaView {
 #[tauri::command]
 pub async fn resolve_media(
     url: String,
+    history_id: Option<String>,
     app: AppHandle,
     state: tauri::State<'_, State>,
 ) -> Result<MediaView> {
+    let saved = history_id
+        .as_deref()
+        .map(|id| history::find_entry(&state, id))
+        .transpose()?;
     let mut draft = state.draft.lock().await;
     emit_progress(&app, "resolve", "正在获取歌曲信息");
     let metadata = platform::resolve(&state, &url).await?;
-    let cover = match remote_cover(&state, &metadata).await {
-        Ok(cover) => cover,
-        Err(_) => crop_background(DEFAULT_COVER.to_vec()).await?,
+    let remote = if saved.as_ref().is_some_and(|entry| entry.draft.custom_cover) {
+        None
+    } else {
+        remote_cover(&state, &metadata).await.ok()
+    };
+    let (cover, thumbnail) = if let Some(cover) = remote {
+        let thumbnail = cover_thumbnail(&cover)?;
+        (cover, thumbnail)
+    } else if let Some(entry) = saved {
+        let thumbnail = entry.draft.cover;
+        let bytes = thumbnail
+            .strip_prefix("data:image/jpeg;base64,")
+            .filter(|value| value.len() <= 128 * 1024)
+            .and_then(|value| STANDARD.decode(value).ok())
+            .ok_or("历史封面无效")?;
+        (crop_background(bytes).await?, thumbnail)
+    } else {
+        let cover = crop_background(DEFAULT_COVER.to_vec()).await?;
+        let thumbnail = cover_thumbnail(&cover)?;
+        (cover, thumbnail)
     };
     let next = Draft {
         id: Uuid::new_v4().to_string(),
@@ -195,7 +226,7 @@ pub async fn resolve_media(
         preview_clip: None,
         analysis: None,
     };
-    let view = MediaView::from(&next);
+    let view = MediaView::new(&next, thumbnail);
     *draft = Some(next);
     Ok(view)
 }
@@ -228,12 +259,18 @@ async fn remote_cover(state: &State, metadata: &Metadata) -> Result<Vec<u8>> {
     crop_background(data).await
 }
 
+#[derive(Serialize)]
+pub struct CoverView {
+    cover: String,
+    thumbnail: String,
+}
+
 #[tauri::command]
 pub async fn replace_cover(
     id: String,
     path: String,
     state: tauri::State<'_, State>,
-) -> Result<String> {
+) -> Result<CoverView> {
     let mut guard = state.draft.lock().await;
     let draft = find_draft(&mut guard, &id)?;
     let path = Path::new(&path);
@@ -246,8 +283,13 @@ pub async fn replace_cover(
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| issue("无法读取封面", e))?;
-    draft.cover = crop_background(bytes).await?;
-    Ok(cover_data(&draft.cover))
+    let cover = crop_background(bytes).await?;
+    let thumbnail = cover_thumbnail(&cover)?;
+    draft.cover = cover;
+    Ok(CoverView {
+        cover: cover_data(&draft.cover),
+        thumbnail,
+    })
 }
 
 async fn crop_background(bytes: Vec<u8>) -> Result<Vec<u8>> {
@@ -292,6 +334,18 @@ fn crop_cover(bytes: &[u8]) -> Result<Vec<u8>> {
 
 fn cover_data(bytes: &[u8]) -> String {
     format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes))
+}
+
+fn cover_thumbnail(cover: &[u8]) -> Result<String> {
+    let image = image::load_from_memory_with_format(cover, image::ImageFormat::Jpeg)
+        .map_err(|e| issue("无法读取封面", e))?
+        .resize_exact(128, 128, image::imageops::FilterType::Lanczos3)
+        .to_rgb8();
+    let mut jpg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpg, 88)
+        .encode_image(&image)
+        .map_err(|e| issue("无法生成历史封面", e))?;
+    Ok(cover_data(&jpg))
 }
 
 fn find_draft<'a>(guard: &'a mut Option<Draft>, id: &str) -> Result<&'a mut Draft> {
@@ -373,16 +427,18 @@ pub async fn analyze_audio(id: String, state: tauri::State<'_, State>) -> Result
 pub async fn preview_audio(
     id: String,
     shift: Option<f64>,
+    tail_seconds: Option<f64>,
     app: AppHandle,
     state: tauri::State<'_, State>,
 ) -> Result<String> {
     let mut guard = state.draft.lock().await;
     let draft = find_draft(&mut guard, &id)?;
     let shift = shift.unwrap_or_default();
-    draft.shifted_duration(shift)?;
-    if let Some((previous_shift, clip)) = &draft.preview_clip {
+    let tail_seconds = tail_seconds.unwrap_or_default();
+    draft.shifted_duration(shift, tail_seconds)?;
+    if let Some((previous_shift, previous_tail, clip)) = &draft.preview_clip {
         let path = clip.path();
-        if *previous_shift == shift && path.is_file() {
+        if *previous_shift == shift && *previous_tail == tail_seconds && path.is_file() {
             return Ok(path.to_string_lossy().into_owned());
         }
     }
@@ -399,9 +455,12 @@ pub async fn preview_audio(
     };
     let clip_path = clip.path();
     let mut process = ffmpeg_input(&state, &path, "error");
-    if shift != 0.0 {
+    if shift != 0.0 || tail_seconds != 0.0 {
         let source = probe_audio(&state, &path).await?;
-        process.args(["-af", &alignment_filter(shift, source.rate)?]);
+        let filters = offset_filters(shift, tail_seconds, source.rate)?;
+        if !filters.is_empty() {
+            process.args(["-af", &filters]);
+        }
     }
     process
         .args(["-c:a", "libvorbis", "-q:a", "3"])
@@ -410,7 +469,7 @@ pub async fn preview_audio(
     clip.scope
         .allow_file(&clip_path)
         .map_err(|e| issue("无法加载试听音轨", e))?;
-    draft.preview_clip = Some((shift, clip));
+    draft.preview_clip = Some((shift, tail_seconds, clip));
     Ok(clip_path.to_string_lossy().into_owned())
 }
 
@@ -428,6 +487,8 @@ pub struct ExportRequest {
     preview: Option<PreviewRange>,
     #[serde(default)]
     shift: f64,
+    #[serde(default)]
+    tail_seconds: f64,
 }
 
 #[tauri::command]
@@ -443,7 +504,7 @@ pub async fn export_map(
         .ok_or("导出前请在设置中选择 Beat Saber 游戏目录")?;
     let mut guard = state.draft.lock().await;
     let draft = find_draft(&mut guard, &payload.id)?;
-    let preview = draft.selected_preview(payload.preview, payload.shift)?;
+    let preview = draft.selected_preview(payload.preview, payload.shift, payload.tail_seconds)?;
     emit_progress(&app, "export", "正在获取所选音轨");
     let input = audio_source(&state, draft, &payload.quality).await?;
     let mut source = probe_audio(&state, &input).await?;
@@ -463,7 +524,7 @@ pub async fn export_map(
         .map_err(|e| issue("无法创建导出目录，请检查游戏目录的写入权限", e))?;
     let song = stage.path().join(SONG_FILE);
     emit_progress(&app, "export", "正在转换为 Ogg");
-    let alignment = alignment_filter(payload.shift, source.rate)?;
+    let alignment = offset_filters(payload.shift, payload.tail_seconds, source.rate)?;
     let (rate, samples, lufs) = encode_song(&state, &input, &song, &source, &alignment, || {
         emit_progress(&app, "export", "正在压缩 Ogg");
     })
@@ -697,16 +758,28 @@ async fn probe_audio(state: &State, path: &Path) -> Result<AudioSource> {
     Ok(source)
 }
 
-fn alignment_filter(shift: f64, rate: u32) -> Result<String> {
-    let samples = (shift * f64::from(rate)).round();
-    if !samples.is_finite() || samples.abs() > f64::from(i32::MAX) {
+fn offset_filters(shift: f64, tail: f64, rate: u32) -> Result<String> {
+    let front = (shift * f64::from(rate)).round();
+    let back = (tail * f64::from(rate)).round();
+    if !front.is_finite()
+        || front.abs() > f64::from(i32::MAX)
+        || !(0.0..=f64::from(i32::MAX)).contains(&back)
+    {
         return Err("音频偏移超出可调整范围".into());
     }
-    Ok(match samples as i64 {
-        0 => String::new(),
-        count if count < 0 => format!("atrim=start_sample={},asetpts=PTS-STARTPTS", -count),
-        count => format!("adelay={count}S:all=1"),
-    })
+    let mut filters = Vec::new();
+    match front as i64 {
+        0 => {}
+        count if count < 0 => filters.push(format!(
+            "atrim=start_sample={},asetpts=PTS-STARTPTS",
+            -count
+        )),
+        count => filters.push(format!("adelay={count}S:all=1")),
+    }
+    if back > 0.0 {
+        filters.push(format!("apad=pad_len={}", back as i64));
+    }
+    Ok(filters.join(","))
 }
 
 fn vorbis_samples(path: &Path) -> Result<(u32, u64)> {
@@ -1063,6 +1136,7 @@ mod tests {
             version: MapVersion::Legacy,
             preview: Some(preview),
             shift: 0.0,
+            tail_seconds: 0.0,
         };
         write_map(dir.path(), &data, 48_000, 144_000, -14.0, preview).unwrap();
         let info: Value =
