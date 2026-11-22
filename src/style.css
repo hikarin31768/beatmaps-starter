@@ -299,8 +299,9 @@ svg { flex: none; }
 .fixed-lead-editor { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
 .fixed-lead-editor input { width: 104px; min-height: 32px; }
 .fixed-lead-editor .button { min-height: 32px; }
-.tail-offset { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.tail-offset input { width: 104px; min-height: 32px; }
+.audio-offset-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px; }
+.tail-offset { display: flex; align-items: center; gap: 8px; border-inline-start: 1px solid var(--line); padding-inline-start: 12px; font-size: 13px; white-space: nowrap; }
+.tail-offset input { width: 80px; min-height: 32px; }
 .alignment-controls .alignment-suggested:not(:disabled) { color: var(--accent-text); border-color: var(--accent-text); background: var(--accent-soft); }
 .alignment-controls .button[aria-pressed="true"] { color: var(--accent-ink); border-color: var(--accent); background: var(--accent); }
 .export-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding-top: 3px; }

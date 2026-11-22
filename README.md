@@ -33,7 +33,7 @@ npm run tauri dev
 
 自动更新从 GitHub 的 `releases/latest/download/latest.json` 检查最新正式版。普通推送会生成预发布版，仅修改 Markdown、`docs/` 或 `.gitignore` 时跳过打包。推送与 `src-tauri/tauri.conf.json` 版本一致的 `v<版本号>` 标签会触发正式发布。工作流使用仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 签署 NSIS 安装包，并随发布上传 `latest.json`。 [Tauri 更新发布说明](https://v2.tauri.app/plugin/updater/)
 
-界面沿用了 Tauri Vue Template 的窗口与导航结构。 [Tauri Vue Template](https://github.com/Ming-D-W/Tauri-Vue-Template) · [MIT 许可](TEMPLATE-LICENSE)
+界面沿用了 Tauri Vue Template 的窗口与导航结构。 [Tauri Vue Template](https://github.com/Ming-D-W/Tauri-Vue-Template) · [MIT 许可](#tauri-vue-template-mit-license)
 
 平台接口和文件格式参考了这些项目的文档。 [网易云音乐 API Enhanced](https://neteasecloudmusicapienhanced.js.org/) · [Bilibili 接口资料](https://github.com/pskdje/bilibili-API-collect) · [yt-dlp](https://github.com/yt-dlp/yt-dlp) · [FFmpeg](https://ffmpeg.org/) · [Beat Saber 谱面格式文档](https://bsmg.wiki/mapping/map-format.html)
 
@@ -43,3 +43,29 @@ BPM 检测参考 ArrowVortex 的起音、周期评分和节拍相位算法，使
 
 ## License
 The application source is licensed under GPL-3.0-or-later (see `LICENSE`). The bundled FFmpeg build is configured without `--enable-gpl`, so FFmpeg and its bundled libraries retain their respective upstream licenses; packaged builds include those notices under `src-tauri/runtime/licenses`.
+
+### Tauri Vue Template MIT License
+
+```text
+MIT License
+
+Copyright (c) 2024 [Your Name]
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

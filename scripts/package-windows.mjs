@@ -63,7 +63,10 @@ if (ffmpeg.toLowerCase() !== ffmpegTarget.toLowerCase()) copyFileSync(ffmpeg, ff
 const ffmpegLicense = [join(dirname(ffmpeg), 'LICENSE'), join(dirname(ffmpeg), '..', 'LICENSE')].find(existsSync)
 writeFileSync(join(notices, 'FFmpeg-build.txt'), ffmpegInfo + '\n\n' + capture(ffmpegTarget, ['-L']) + '\n')
 if (ffmpegLicense) copyFileSync(ffmpegLicense, join(notices, 'FFmpeg-LICENSE.txt'))
-copyFileSync(join(root, 'TEMPLATE-LICENSE'), join(notices, 'Tauri-Vue-Template.txt'))
+const templateLicense = readFileSync(join(root, 'README.md'), 'utf8')
+  .match(/^### Tauri Vue Template MIT License\r?\n\r?\n```text\r?\n([\s\S]+?)\r?\n```/m)?.[1]
+if (!templateLicense) throw new Error('README.md 缺少 Tauri Vue Template 的 MIT 声明。')
+writeFileSync(join(notices, 'Tauri-Vue-Template.txt'), templateLicense + '\n')
 
 const checksumFile = join(runtime, 'yt-dlp-sha256.txt')
 fetch(`${base}/SHA2-256SUMS`, checksumFile)

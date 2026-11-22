@@ -81,12 +81,15 @@ const hasBpm = computed(() => Number.isFinite(map.bpm) && map.bpm >= 1 && map.bp
 const canAlign = computed(() => analysis.value?.firstBeat != null && hasBpm.value)
 const validTail = computed(() => Number.isFinite(map.tailOffset) && map.tailOffset >= 0)
 const tailSeconds = computed(() => validTail.value ? offsetInSeconds(map.tailOffset, map.tailOffsetUnit) : 0)
-const tailBeats = computed({
-  get: () => map.tailOffset == null || !hasBpm.value ? '' : map.tailOffsetUnit === 'beats'
-    ? map.tailOffset : Number(beatsFor(tailSeconds.value).toFixed(3)),
+const tailSecondsInput = computed({
+  get: () => {
+    if (map.tailOffset == null) return ''
+    if (map.tailOffsetUnit === 'seconds') return map.tailOffset
+    return hasBpm.value ? Number(tailSeconds.value.toFixed(3)) : ''
+  },
   set: value => {
     map.tailOffset = value === '' ? null : value
-    map.tailOffsetUnit = 'beats'
+    map.tailOffsetUnit = 'seconds'
   },
 })
 const trackDuration = computed(() => media.value
@@ -734,19 +737,26 @@ async function openExport(path) {
                 :src="preview" :loading="busy === 'preview'" :disabled="!!busy" :can-play="!!map.quality" :active="resultVisible"
                 @update:range="updatePreviewRange" @load="playPreview" />
               <p v-if="busy === 'preview'" class="muted preview-status" role="status">{{ progress }}</p>
-              <div class="alignment-controls">
-                <span class="muted" aria-live="polite">音频前偏移
-                  <button v-if="alignment === 'fixed'" ref="fixedLeadButton" type="button" class="alignment-value"
-                    :disabled="!!busy || !canAlign" :aria-label="currentLeadBeats == null ? '调整固定前偏移' : `调整固定前偏移，当前 ${beatValue.format(currentLeadBeats)} 拍`"
-                    :aria-expanded="editingFixedLead" @click="editFixedLead">{{ currentLeadBeats == null ? '—' : `${beatValue.format(currentLeadBeats)} 拍` }}</button>
-                  <template v-else-if="currentLeadBeats != null">{{ beatValue.format(currentLeadBeats) }} 拍</template>
-                  <span v-if="currentLeadIn != null" :class="{ 'offset-positive': map.shift > 0, 'offset-negative': map.shift < 0 }">（{{ offsetSeconds.format(map.shift) }} 秒）</span>
-                </span>
-                <button type="button" class="button secondary" :disabled="!!busy || !canAlign" :aria-pressed="alignment === 'minimum'"
-                  @click="applyAlignment('minimum')">最小变动</button>
-                <button type="button" class="button secondary" :class="{ 'alignment-suggested': alignment !== 'fixed' && currentLeadIn != null && currentLeadIn < 2 }"
-                  :disabled="!!busy || !canAlign" :aria-pressed="alignment === 'fixed'" @click="applyAlignment('fixed')">按固定值</button>
-                <button v-if="alignment" type="button" class="text-button" :disabled="!!busy" @click="applyAlignment('')">还原</button>
+              <div class="audio-offset-row">
+                <div class="alignment-controls">
+                  <span class="muted" aria-live="polite">音频前偏移
+                    <button v-if="alignment === 'fixed'" ref="fixedLeadButton" type="button" class="alignment-value"
+                      :disabled="!!busy || !canAlign" :aria-label="currentLeadBeats == null ? '调整固定前偏移' : `调整固定前偏移，当前 ${beatValue.format(currentLeadBeats)} 拍`"
+                      :aria-expanded="editingFixedLead" @click="editFixedLead">{{ currentLeadBeats == null ? '—' : `${beatValue.format(currentLeadBeats)} 拍` }}</button>
+                    <template v-else-if="currentLeadBeats != null">{{ beatValue.format(currentLeadBeats) }} 拍</template>
+                    <span v-if="currentLeadIn != null" :class="{ 'offset-positive': map.shift > 0, 'offset-negative': map.shift < 0 }">（{{ offsetSeconds.format(map.shift) }} 秒）</span>
+                  </span>
+                  <button type="button" class="button secondary" :disabled="!!busy || !canAlign" :aria-pressed="alignment === 'minimum'"
+                    @click="applyAlignment('minimum')">最小变动</button>
+                  <button type="button" class="button secondary" :class="{ 'alignment-suggested': alignment !== 'fixed' && currentLeadIn != null && currentLeadIn < 2 }"
+                    :disabled="!!busy || !canAlign" :aria-pressed="alignment === 'fixed'" @click="applyAlignment('fixed')">按固定值</button>
+                  <button v-if="alignment" type="button" class="text-button" :disabled="!!busy" @click="applyAlignment('')">还原</button>
+                </div>
+                <label class="tail-offset muted">音频后偏移
+                  <input v-model.number="tailSecondsInput" type="number" min="0" step="any" required
+                    aria-label="音频后偏移（秒）" placeholder="—" :disabled="!!busy" />
+                  <span>秒</span>
+                </label>
               </div>
               <div v-if="editingFixedLead" class="fixed-lead-editor" @keydown.esc.prevent.stop="closeFixedLeadEditor">
                 <label for="fixed-lead">目标前留白（拍）</label>
@@ -755,11 +765,6 @@ async function openExport(path) {
                 <button type="button" class="button primary" :disabled="!!busy || !validFixedLead || !canAlign" @click="saveFixedLead">保存</button>
                 <button type="button" class="text-button" :disabled="!!busy" @click="closeFixedLeadEditor">取消</button>
               </div>
-              <label class="tail-offset muted">音频后偏移
-                <input v-model.number="tailBeats" type="number" min="0" step="any" required
-                  aria-label="音频后偏移（拍）" placeholder="—" :disabled="!!busy || !hasBpm" />
-                <span>拍</span>
-              </label>
             </div>
 
             <div class="panel result-panel">
