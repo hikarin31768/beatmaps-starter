@@ -193,6 +193,7 @@ fn main() {
             history::delete_history,
             updates::check_update,
             updates::install_update,
+            updates::open_project_source,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Beatmaps Starter 失败");

@@ -1,18 +1,19 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { Channel, convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
   ArrowDownToLine, ArrowLeft, ArrowRight, AudioLines, Check, ChevronDown, ChevronRight, ChevronUp, Crop, FileImage, Folder,
-  Eye, FolderOpen, History, House, Link2, LoaderCircle, Minus, Pencil, Settings2, Square, Trash2, UserRound, X,
+  ExternalLink, Eye, FolderOpen, History, House, Link2, LoaderCircle, Minus, Pencil, Settings2, Square, Trash2, UserRound, X,
 } from 'lucide-vue-next'
 import LoginPage from './components/LoginPage.vue'
 import CoverCropDialog from './components/CoverCropDialog.vue'
 import OffsetDefaults from './components/OffsetDefaults.vue'
 import PlatformIcon from './components/PlatformIcon.vue'
 import PreviewPlayer from './components/PreviewPlayer.vue'
+import UpdateDialog from './components/UpdateDialog.vue'
 import { durationText, pickQuality, platforms } from './platforms'
 
 const navigation = [
@@ -65,8 +66,10 @@ const fixedLeadInput = ref('')
 const fixedLeadField = ref(null)
 const fixedLeadButton = ref(null)
 const exportPath = ref('')
-const updateVersion = ref('')
+const availableUpdate = ref(null)
 const updateStatus = ref('')
+const updateError = ref('')
+const updateDownload = ref(null)
 const busy = ref('')
 const progress = ref('')
 const error = ref('')
@@ -103,10 +106,22 @@ const trackDuration = computed(() => {
 const canDoubleBpm = computed(() => Number.isFinite(Number(map.bpm)) && Number(map.bpm) >= 1 && Number(map.bpm) <= 500)
 const canHalveBpm = computed(() => Number.isFinite(Number(map.bpm)) && Number(map.bpm) >= 2 && Number(map.bpm) <= 1000)
 const currentLeadIn = computed(() => analysis.value ? Math.max(0, analysis.value.leading + map.shift) : null)
-const currentLeadBeats = computed(() => currentLeadIn.value != null && hasBpm.value ? beatsFor(currentLeadIn.value) : null)
+const currentLeadBeats = computed(() => {
+  if (!canAlign.value) return null
+  const target = firstBeatAlignment(alignment.value || 'minimum')
+  return target.shift === map.shift
+    ? target.beatIndex
+    : Math.max(0, beatsFor(analysis.value.firstBeat + map.shift))
+})
 const fixedLeadTarget = computed(() => fixedLeadOverride.value ?? { value: settings.leadIn, unit: settings.leadInUnit })
 const validFixedLead = computed(() => Number.isFinite(fixedLeadInput.value) && fixedLeadInput.value >= 0)
 const beatValue = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 })
+const leadBeatLabel = computed(() => {
+  const value = currentLeadBeats.value
+  if (value == null) return ''
+  const roundsToInteger = !Number.isInteger(value) && Number.isInteger(Number(value.toFixed(3)))
+  return `${roundsToInteger ? value : beatValue.format(value)} 拍`
+})
 const offsetSeconds = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3, signDisplay: 'always' })
 const historyDate = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' })
 const allHistorySelected = computed(() => historyEntries.value.length > 0
@@ -252,11 +267,12 @@ function browseDirectory(target) {
 
 function checkForUpdates() {
   run('update-check', '正在检查更新', async () => {
-    updateVersion.value = ''
+    availableUpdate.value = null
     updateStatus.value = ''
+    updateError.value = ''
     try {
-      updateVersion.value = await invoke('check_update') || ''
-      updateStatus.value = updateVersion.value ? `发现新版本 ${updateVersion.value}` : '没有可用的正式版更新'
+      availableUpdate.value = await invoke('check_update')
+      if (!availableUpdate.value) updateStatus.value = '没有可用的正式版更新'
     } catch (reason) {
       updateStatus.value = String(reason)
     }
@@ -264,7 +280,35 @@ function checkForUpdates() {
 }
 
 function installUpdate() {
-  run('update', '正在下载更新', () => invoke('install_update', { version: updateVersion.value }))
+  if (!availableUpdate.value) return
+  const { version } = availableUpdate.value
+  run('update', '', async () => {
+    updateError.value = ''
+    updateDownload.value = { phase: 'downloading', received: 0, total: null }
+    let receivingProgress = true
+    const onEvent = new Channel(event => {
+      if (receivingProgress) updateDownload.value = event
+    })
+    try {
+      await flushHistory()
+      await invoke('install_update', { version, onEvent })
+    } catch (reason) {
+      updateError.value = String(reason)
+      updateDownload.value = null
+    } finally {
+      receivingProgress = false
+    }
+  })
+}
+
+function dismissUpdate() {
+  if (busy.value === 'update') return
+  availableUpdate.value = null
+  updateDownload.value = null
+}
+
+function openProjectSource() {
+  run('project-source', '', () => invoke('open_project_source'))
 }
 
 function setupNext() {
@@ -495,19 +539,22 @@ async function analyzeAudio(id, fillBpm = true) {
   }
 }
 
+function firstBeatAlignment(mode) {
+  if (!mode || !canAlign.value) return null
+  const { leading, firstBeat } = analysis.value
+  const period = 60 / map.bpm
+  const target = fixedLeadTarget.value
+  const beatIndex = Math.max(0, mode === 'minimum'
+    ? Math.ceil(firstBeat / period - 1e-9)
+    : Math.max(Math.ceil((firstBeat - leading) / period - 1e-9),
+      Math.round((offsetInSeconds(target.value, target.unit) + firstBeat - leading) / period)))
+  const shift = beatIndex * period - firstBeat
+  return { beatIndex, shift: Math.abs(shift) < 1e-8 ? 0 : shift }
+}
+
 function applyAlignment(mode) {
-  let shift = 0
-  if (mode && canAlign.value) {
-    if (mode === 'fixed' && !fixedLeadOverride.value) fixedLeadOverride.value = fixedLeadTarget.value
-    const { leading, firstBeat } = analysis.value
-    const period = 60 / map.bpm
-    const beatIndex = mode === 'minimum'
-      ? Math.ceil(firstBeat / period - 1e-9)
-      : Math.max(Math.ceil((firstBeat - leading) / period - 1e-9),
-        Math.round((offsetInSeconds(fixedLeadTarget.value.value, fixedLeadTarget.value.unit) + firstBeat - leading) / period))
-    shift = beatIndex * period - firstBeat
-    if (Math.abs(shift) < 1e-8) shift = 0
-  }
+  if (mode === 'fixed' && canAlign.value && !fixedLeadOverride.value) fixedLeadOverride.value = fixedLeadTarget.value
+  const shift = firstBeatAlignment(mode)?.shift ?? 0
   alignment.value = mode
   if (mode !== 'fixed') editingFixedLead.value = false
   if (shift === map.shift) return
@@ -780,9 +827,9 @@ async function openExport(path) {
                 <div class="alignment-controls">
                   <span class="muted" aria-live="polite">音频前偏移
                     <button v-if="alignment === 'fixed'" ref="fixedLeadButton" type="button" class="alignment-value"
-                      :disabled="!!busy || !canAlign" :aria-label="currentLeadBeats == null ? '调整固定前偏移' : `调整固定前偏移，当前 ${beatValue.format(currentLeadBeats)} 拍`"
-                      :aria-expanded="editingFixedLead" @click="editFixedLead">{{ currentLeadBeats == null ? '—' : `${beatValue.format(currentLeadBeats)} 拍` }}</button>
-                    <template v-else-if="currentLeadBeats != null">{{ beatValue.format(currentLeadBeats) }} 拍</template>
+                      :disabled="!!busy || !canAlign" :aria-label="leadBeatLabel ? `调整固定前偏移，当前 ${leadBeatLabel}` : '调整固定前偏移'"
+                      :aria-expanded="editingFixedLead" @click="editFixedLead">{{ leadBeatLabel || '—' }}</button>
+                    <template v-else-if="leadBeatLabel">{{ leadBeatLabel }}</template>
                     <span v-if="currentLeadIn != null" :class="{ 'offset-positive': map.shift > 0, 'offset-negative': map.shift < 0 }">（{{ offsetSeconds.format(map.shift) }} 秒）</span>
                   </span>
                   <button type="button" class="button secondary" :disabled="!!busy || !canAlign" :aria-pressed="alignment === 'minimum'"
@@ -923,8 +970,7 @@ async function openExport(path) {
               <div class="settings-row">
                 <span>软件更新</span>
                 <div class="update-controls">
-                  <span v-if="busy === 'update-check' || busy === 'update' || updateStatus" class="muted" role="status">{{ busy === 'update-check' || busy === 'update' ? progress : updateStatus }}</span>
-                  <button v-if="updateVersion" class="button primary" type="button" :disabled="!!busy" @click="installUpdate">下载并安装</button>
+                  <span v-if="busy === 'update-check' || updateStatus" class="muted" role="status">{{ busy === 'update-check' ? progress : updateStatus }}</span>
                   <button class="button secondary" type="button" :disabled="!!busy" @click="checkForUpdates">检查更新</button>
                 </div>
               </div>
@@ -947,12 +993,21 @@ async function openExport(path) {
             <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
             <button type="submit" class="button primary save-button" :disabled="!!busy"><Check :size="18" /> 保存设置</button>
           </form>
+          <footer class="settings-footer">
+            <span>项目源码</span>
+            <a href="https://github.com/hikarin31768/beatmaps-starter" @click.prevent="openProjectSource">
+              github.com/hikarin31768/beatmaps-starter <ExternalLink :size="13" />
+            </a>
+          </footer>
         </section>
       </main>
     </div>
 
     <CoverCropDialog v-if="coverCrop" :image="coverCrop" :saving="busy === 'cover'" :error="error"
       @apply="applyCoverCrop" @cancel="cancelCoverCrop" />
+
+    <UpdateDialog v-if="availableUpdate" :update="availableUpdate" :download="updateDownload"
+      :installing="busy === 'update'" :error="updateError" @install="installUpdate" @dismiss="dismissUpdate" />
 
     <Transition>
       <div v-if="notification" class="toast" role="status">

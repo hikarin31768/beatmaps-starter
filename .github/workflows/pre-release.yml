@@ -89,6 +89,7 @@ jobs:
         run: node scripts/create-updater-manifest.mjs
         env:
           RELEASE_TAG: ${{ steps.channel.outputs.release_tag }}
+          RELEASE_NOTES_PATH: ${{ steps.channel.outputs.release_notes }}
 
       - name: Publish release
         uses: softprops/action-gh-release@v3

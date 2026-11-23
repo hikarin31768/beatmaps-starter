@@ -26,9 +26,11 @@ copyFileSync(installerPath, join(assetsDir, installer))
 copyFileSync(signaturePath, join(assetsDir, `${installer}.sig`))
 
 const url = `https://github.com/${repository}/releases/download/${encodeURIComponent(tag)}/${installer}`
+const notesPath = process.env.RELEASE_NOTES_PATH?.trim()
+const notes = notesPath ? readFileSync(join(root, notesPath), 'utf8').trim() : undefined
 const manifest = {
   version: config.version,
-  notes: `Beatmaps Starter ${config.version}`,
+  notes: notes || undefined,
   pub_date: new Date().toISOString(),
   platforms: {
     'windows-x86_64': { signature, url },

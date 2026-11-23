@@ -354,6 +354,23 @@ svg { flex: none; }
 .offset-value-unit { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .offset-value-unit select { width: auto; }
 .save-button { justify-self: end; }
+.settings-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+.settings-footer a { display: inline-flex; align-items: center; gap: 5px; color: var(--accent-text); text-underline-offset: 2px; }
+
+.update-dialog { width: min(540px, 92vw); max-height: 90vh; padding: 22px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); }
+.update-dialog::backdrop { background: #0009; }
+.update-dialog-content { display: grid; gap: 15px; }
+.update-notes { display: grid; gap: 8px; max-height: min(43vh, 360px); overflow: auto; padding: 13px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-deep); overflow-wrap: anywhere; }
+.update-notes h3, .update-notes h4, .update-notes ul { margin: 0; }
+.update-notes h3 { font-size: 14px; }
+.update-notes h4 { font-size: 13px; }
+.update-notes ul { padding-inline-start: 20px; }
+.update-notes li + li { margin-top: 4px; }
+.update-progress { display: grid; gap: 7px; }
+.update-progress-label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.update-progress-label > span:first-child { margin-inline-end: auto; }
+.update-progress progress { width: 100%; height: 12px; accent-color: var(--accent-text); }
+.update-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .login-page { width: min(100%, 918px); min-height: 100%; display: flex; flex-direction: column; margin: 0 auto; padding: 25px clamp(28px, 5vw, 55px); }
 .login-content { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px; padding: 13px 0 23px; text-align: center; }
@@ -374,12 +391,13 @@ svg { flex: none; }
 .cover-crop-dialog { width: min(550px, 92vw); max-height: 92vh; padding: 22px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); }
 .cover-crop-dialog::backdrop { background: #0009; }
 .cover-crop-dialog form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
-.cover-crop-stage { position: relative; justify-self: center; min-width: 0; overflow: hidden; background: var(--base); touch-action: none; cursor: move; }
+.cover-crop-stage { position: relative; justify-self: center; min-width: 0; overflow: hidden; background: var(--base); touch-action: none; user-select: none; cursor: move; }
 .cover-crop-stage:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 .cover-crop-stage img { display: block; width: 100%; height: 100%; pointer-events: none; }
 .cover-crop-frame { position: absolute; border: 2px solid #fff; box-shadow: 0 0 0 200vmax #0009; pointer-events: none; }
-.cover-crop-size { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; white-space: nowrap; }
-.cover-crop-size input { flex: 1; width: 0; min-height: 24px; padding: 0; accent-color: var(--accent-text); }
+.cover-crop-handle { position: absolute; right: -2px; bottom: -2px; width: 24px; height: 24px; padding: 0; border: 0; background: transparent; pointer-events: auto; cursor: nwse-resize; }
+.cover-crop-handle::after { content: ''; position: absolute; right: 2px; bottom: 2px; width: 12px; height: 12px; border: 2px solid #19201c; border-radius: 50%; background: #fff; }
+.cover-crop-handle:focus-visible { outline-offset: -2px; }
 .cover-crop-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .toast { position: absolute; z-index: 10; top: 56px; right: 20px; display: flex; gap: 10px; align-items: center; max-width: calc(100vw - 40px); padding: 10px 10px 10px 13px; border: 1px solid color-mix(in srgb, var(--success) 45%, var(--line)); border-radius: 11px; background: var(--accent-soft); color: var(--success); box-shadow: 0 8px 34px #0003; }
