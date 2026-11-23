@@ -25,13 +25,7 @@ npm run tauri dev
 
 前端构建使用 `npm run build`。开发时的设置和平台会话保存在 `src-tauri/.dev-data`。
 
-## Windows 安装包
-
-打包使用项目的音频版 FFmpeg。在 MSYS2 中准备 MinGW-w64 GCC、MSYS GNU Make、CMake、Ninja、NASM 和 pkg-config，然后运行 `bash scripts/build-ffmpeg.sh`。脚本构建 `src-tauri/runtime/ffmpeg.exe` 和 `ffprobe.exe`，并用谱面样例检查 Vorbis 导出。
-
-执行 `npm run package:windows` 时，脚本会将网易云助手的运行依赖合并为脚本和数据文件，再和音频版 FFmpeg、FFprobe、本机 Node.js 以及校验后的 yt-dlp 一起打包。可以用 `BEATMAPS_FFMPEG` 和 `BEATMAPS_FFPROBE` 指定独立版本。安装包输出在 `src-tauri/target/release/bundle/nsis`。
-
-自动更新从 GitHub 的 `releases/latest/download/latest.json` 检查最新正式版。普通推送会生成预发布版，仅修改 Markdown、`docs/` 或 `.gitignore` 时跳过打包。推送与 `src-tauri/tauri.conf.json` 版本一致的 `v<版本号>` 标签会触发正式发布。工作流使用仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 签署 NSIS 安装包，并随发布上传 `latest.json`。 [Tauri 更新发布说明](https://v2.tauri.app/plugin/updater/)
+## 引用声明
 
 界面沿用了 Tauri Vue Template 的窗口与导航结构。 [Tauri Vue Template](https://github.com/Ming-D-W/Tauri-Vue-Template) · [MIT 许可](#tauri-vue-template-mit-license)
 
