@@ -5,10 +5,11 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
-  ArrowDownToLine, ArrowLeft, ArrowRight, AudioLines, Check, ChevronDown, ChevronRight, ChevronUp, FileImage, Folder,
+  ArrowDownToLine, ArrowLeft, ArrowRight, AudioLines, Check, ChevronDown, ChevronRight, ChevronUp, Crop, FileImage, Folder,
   Eye, FolderOpen, History, House, Link2, LoaderCircle, Minus, Pencil, Settings2, Square, Trash2, UserRound, X,
 } from 'lucide-vue-next'
 import LoginPage from './components/LoginPage.vue'
+import CoverCropDialog from './components/CoverCropDialog.vue'
 import OffsetDefaults from './components/OffsetDefaults.vue'
 import PlatformIcon from './components/PlatformIcon.vue'
 import PreviewPlayer from './components/PreviewPlayer.vue'
@@ -43,6 +44,7 @@ const map = reactive({})
 const draftUrl = ref('')
 const historyId = ref('')
 const customCover = ref(false)
+const coverCrop = ref(null)
 const historyEntries = ref([])
 const loadingHistory = ref(false)
 const historyError = ref('')
@@ -52,6 +54,7 @@ const selectedHistoryIds = ref([])
 const editing = ref(false)
 const preview = ref('')
 const previewSource = ref(null)
+const decodedSourceDuration = ref(0)
 const analysis = ref(null)
 const analyzing = ref(false)
 const analysisError = ref('')
@@ -92,9 +95,11 @@ const tailSecondsInput = computed({
     map.tailOffsetUnit = 'seconds'
   },
 })
-const trackDuration = computed(() => media.value
-  ? (media.value.duration || media.value.preview.end) + (map.shift || 0) + tailSeconds.value
-  : 0)
+const trackDuration = computed(() => {
+  if (!media.value) return 0
+  const source = decodedSourceDuration.value || media.value.duration || media.value.preview.end
+  return source > 0 ? Math.max(0, source + map.shift + tailSeconds.value) : 0
+})
 const canDoubleBpm = computed(() => Number.isFinite(Number(map.bpm)) && Number(map.bpm) >= 1 && Number(map.bpm) <= 500)
 const canHalveBpm = computed(() => Number.isFinite(Number(map.bpm)) && Number(map.bpm) >= 2 && Number(map.bpm) <= 1000)
 const currentLeadIn = computed(() => analysis.value ? Math.max(0, analysis.value.leading + map.shift) : null)
@@ -116,7 +121,7 @@ const historyDraft = computed(() => {
     customCover: customCover.value,
     form: {
       title, subtitle, artist, mapper, bpm: Number.isFinite(bpm) ? bpm : null, version, quality,
-      preview, previewSource: previewSource.value, shift, alignment: alignment.value,
+      preview, previewToTrackEnd: map.previewToTrackEnd, previewSource: previewSource.value, shift, alignment: alignment.value,
       fixedLead: fixedLeadOverride.value,
       editingFixedLead: editingFixedLead.value,
       fixedLeadInput: editingFixedLead.value && Number.isFinite(fixedLeadInput.value) ? fixedLeadInput.value : null,
@@ -151,8 +156,8 @@ watch([page, step, login, resultVisible], async ([, , , visible], [, , , wasVisi
   scroll.value?.scrollTo(0, resultVisible.value ? resultScrollTop : 0)
 })
 watch([() => map.shift, tailSeconds], () => { preview.value = '' })
-watch(tailSeconds, () => {
-  if (media.value && map.preview.end > trackDuration.value) alignPreviewRange()
+watch(trackDuration, duration => {
+  if (media.value && (map.previewToTrackEnd || map.preview.end > duration)) alignPreviewRange()
 })
 watch(() => map.bpm, () => {
   if (analysis.value && alignment.value) applyAlignment(canAlign.value ? alignment.value : '')
@@ -448,6 +453,7 @@ async function openDraft(url, entry = null) {
   draftUrl.value = url
   sourceUrl.value = url
   customCover.value = entry?.customCover ?? false
+  decodedSourceDuration.value = 0
   preview.value = ''
   exportPath.value = ''
   editing.value = false
@@ -464,10 +470,11 @@ async function openDraft(url, entry = null) {
     quality: result.qualities.some(item => item.id === saved?.quality) ? saved.quality : pickQuality(result, settings),
     version: saved?.version ?? settings.version, mapper: saved?.mapper ?? settings.mapper, bpm: saved?.bpm ?? null,
     preview: saved?.preview ?? result.preview, shift: saved?.shift ?? 0,
+    previewToTrackEnd: saved?.previewToTrackEnd ?? result.previewToTrackEnd,
     tailOffset: saved ? saved.tailOffset : settings.tailOffset,
     tailOffsetUnit: saved?.tailOffsetUnit ?? settings.tailOffsetUnit,
   })
-  if (map.preview.end > trackDuration.value) alignPreviewRange()
+  if (map.previewToTrackEnd || map.preview.end > trackDuration.value) alignPreviewRange()
   page.value = 'home'
   if (result.qualities.length) void analyzeAudio(result.id, saved?.bpm == null)
 }
@@ -509,9 +516,12 @@ function applyAlignment(mode) {
 }
 
 function alignPreviewRange() {
-  const end = Math.min(trackDuration.value, previewSource.value.end + map.shift)
-  const start = Math.max(0, previewSource.value.start + map.shift)
-  map.preview = end > start ? { start, end } : { start: 0, end: Math.min(trackDuration.value, 10) }
+  const duration = trackDuration.value
+  const end = map.previewToTrackEnd ? duration : Math.min(duration, previewSource.value.end + map.shift)
+  const start = map.previewToTrackEnd && previewSource.value.start === 0
+    ? 0 : Math.max(0, previewSource.value.start + map.shift)
+  const range = end > start ? { start, end } : { start: 0, end: duration }
+  if (range.start !== map.preview.start || range.end !== map.preview.end) map.preview = range
 }
 
 async function editFixedLead() {
@@ -538,8 +548,16 @@ function saveFixedLead() {
 }
 
 function updatePreviewRange(range) {
+  if (range.end !== map.preview.end) map.previewToTrackEnd = false
+  const previousStart = previewSource.value.start
+  const start = range.start === map.preview.start ? previousStart : range.start - map.shift
   map.preview = range
-  previewSource.value = { start: range.start - map.shift, end: range.end - map.shift }
+  previewSource.value = { start, end: range.end - map.shift }
+}
+
+function updateTrackDuration(duration) {
+  const source = duration - map.shift - tailSeconds.value
+  if (source > 0) decodedSourceDuration.value = source
 }
 
 async function editMetadata() {
@@ -556,10 +574,28 @@ function chooseCover() {
       multiple: false, title: '替换谱面封面',
       filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
     })
-    if (path) {
-      Object.assign(media.value, await invoke('replace_cover', { id: map.id, path }))
-      customCover.value = true
-    }
+    if (path) coverCrop.value = await invoke('prepare_cover_crop', { id: map.id, path })
+  })
+}
+
+function editCoverCrop() {
+  run('cover', '', async () => {
+    coverCrop.value = await invoke('prepare_cover_crop', { id: map.id, path: null })
+  })
+}
+
+function applyCoverCrop(region) {
+  run('cover', '', async () => {
+    Object.assign(media.value, await invoke('apply_cover_crop', { id: map.id, region }))
+    customCover.value = true
+    coverCrop.value = null
+  })
+}
+
+function cancelCoverCrop() {
+  run('cover', '', async () => {
+    await invoke('discard_cover_crop', { id: map.id })
+    coverCrop.value = null
   })
 }
 
@@ -707,10 +743,13 @@ async function openExport(path) {
           <button type="button" class="text-button back-button" :disabled="!!busy" @click="closeDraft"><ArrowLeft :size="17" /> 返回首页</button>
           <form @submit.prevent="exportMap">
             <div class="media-summary">
-              <button class="cover-button" type="button" :disabled="!!busy" aria-label="替换封面" title="替换封面" @click="chooseCover">
+              <div class="media-cover">
                 <img :src="media.cover" alt="谱面封面" />
-                <span><FileImage :size="15" /> 替换封面</span>
-              </button>
+                <div class="cover-actions">
+                  <button type="button" :disabled="!!busy" aria-label="替换封面" title="替换封面" @click="chooseCover"><FileImage :size="17" /></button>
+                  <button type="button" :disabled="!!busy" aria-label="裁切封面" title="裁切封面" @click="editCoverCrop"><Crop :size="17" /></button>
+                </div>
+              </div>
               <div class="media-heading">
                 <div class="media-source"><PlatformIcon :platform="media.platform" />{{ sourcePlatform.name }}
                   <span v-if="media.duration > 0" class="duration">{{ durationText(media.duration) }}</span>
@@ -734,8 +773,8 @@ async function openExport(path) {
               </select>
               <p v-else class="muted">没有可用的完整音轨。登录账号或更换链接后重新解析。</p>
               <PreviewPlayer :key="`${map.id}:${map.shift}:${tailSeconds}`" :range="map.preview" :track-duration="trackDuration"
-                :src="preview" :loading="busy === 'preview'" :disabled="!!busy" :can-play="!!map.quality" :active="resultVisible"
-                @update:range="updatePreviewRange" @load="playPreview" />
+                :src="preview" :loading="busy === 'preview'" :disabled="!!busy" :can-play="!!map.quality" :active="resultVisible && !coverCrop"
+                :end-at-track="map.previewToTrackEnd" @duration="updateTrackDuration" @update:range="updatePreviewRange" @load="playPreview" />
               <p v-if="busy === 'preview'" class="muted preview-status" role="status">{{ progress }}</p>
               <div class="audio-offset-row">
                 <div class="alignment-controls">
@@ -911,6 +950,9 @@ async function openExport(path) {
         </section>
       </main>
     </div>
+
+    <CoverCropDialog v-if="coverCrop" :image="coverCrop" :saving="busy === 'cover'" :error="error"
+      @apply="applyCoverCrop" @cancel="cancelCoverCrop" />
 
     <Transition>
       <div v-if="notification" class="toast" role="status">

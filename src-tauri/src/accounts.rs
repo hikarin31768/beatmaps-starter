@@ -407,10 +407,21 @@ pub fn close_bili_login(app: AppHandle) {
 
 #[tauri::command]
 pub fn open_youtube() -> Result<()> {
+    open_youtube_page("https://www.youtube.com/account")
+}
+
+#[tauri::command]
+pub fn open_youtube_cookie_extension() -> Result<()> {
+    open_youtube_page(
+        "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc",
+    )
+}
+
+fn open_youtube_page(url: &str) -> Result<()> {
     std::process::Command::new("explorer.exe")
-        .arg("https://www.youtube.com/account")
+        .arg(url)
         .spawn()
-        .map_err(|e| issue("无法打开 YouTube", e))?;
+        .map_err(|e| issue("无法打开浏览器", e))?;
     Ok(())
 }
 

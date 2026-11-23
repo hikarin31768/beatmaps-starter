@@ -7,6 +7,7 @@ use std::{
     fs,
     io::Cursor,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tauri::{AppHandle, Manager};
 use tempfile::TempDir;
@@ -25,13 +26,15 @@ const COVER_FILE: &str = "cover.jpg";
 const SONG_BYTES: u64 = 10_000_000;
 const SONG_FILE: &str = "song.ogg";
 const AUDIO_DATA_FILE: &str = "AudioData.dat";
-const PREVIEW_SECONDS: f64 = 10.0;
 const DEFAULT_COVER: &[u8] = include_bytes!("../icons/icon.png");
 
 pub struct Draft {
     id: String,
     metadata: Metadata,
     cover: Vec<u8>,
+    cover_source: Arc<[u8]>,
+    cover_region: Option<CoverRegion>,
+    pending_cover: Option<Arc<[u8]>>,
     cached_file: Option<(String, TempDir)>,
     lowest_file: Option<(String, TempDir)>,
     preview_clip: Option<(f64, f64, PreviewClip)>,
@@ -43,8 +46,9 @@ impl Draft {
         self.metadata.source.platform()
     }
 
-    fn preview(&self) -> PreviewRange {
-        PreviewRange::new(self.metadata.chorus_start, self.metadata.duration)
+    fn chorus_preview(&self) -> Option<PreviewRange> {
+        let (start, end) = self.metadata.chorus?;
+        PreviewRange::chorus(start, end, self.metadata.duration)
     }
 
     fn shifted_duration(&self, shift: f64, tail_seconds: f64) -> Result<f64> {
@@ -66,10 +70,27 @@ impl Draft {
         preview: Option<PreviewRange>,
         shift: f64,
         tail_seconds: f64,
+        to_track_end: bool,
     ) -> Result<PreviewRange> {
-        preview
-            .unwrap_or_else(|| self.preview())
-            .validate(self.shifted_duration(shift, tail_seconds)?)
+        let duration = self.shifted_duration(shift, tail_seconds)?;
+        if let Some(preview) = preview {
+            if to_track_end {
+                if !preview.start.is_finite()
+                    || preview.start < 0.0
+                    || (duration > 0.0 && preview.start >= duration)
+                {
+                    return Err("请选择有效的预览入点和出点".into());
+                }
+                return Ok(PreviewRange {
+                    end: duration,
+                    ..preview
+                });
+            }
+            return preview.validate(duration);
+        }
+        Ok(self
+            .chorus_preview()
+            .unwrap_or_else(|| PreviewRange::full(duration)))
     }
 
     fn lowest_quality(&self) -> Result<String> {
@@ -105,24 +126,25 @@ pub struct PreviewRange {
 }
 
 impl PreviewRange {
-    fn new(chorus_start: Option<f64>, duration: f64) -> Self {
-        let limit = if duration > 0.0 {
-            duration
+    fn chorus(start: f64, end: f64, duration: f64) -> Option<Self> {
+        let end = if duration > 0.0 {
+            end.min(duration)
         } else {
-            f64::INFINITY
+            end
         };
-        let start = chorus_start
-            .filter(|start| *start >= 0.0 && *start < limit)
-            .unwrap_or_default();
+        (start < end).then_some(Self { start, end })
+    }
+
+    fn full(duration: f64) -> Self {
         Self {
-            start,
-            end: (start + PREVIEW_SECONDS).min(limit),
+            start: 0.0,
+            end: duration.max(0.0),
         }
     }
 
     fn within(self, duration: f64) -> Self {
         if self.start >= duration {
-            return Self::new(None, duration);
+            return Self::full(duration);
         }
         Self {
             end: self.end.min(duration),
@@ -162,12 +184,14 @@ pub struct MediaView {
     thumbnail: String,
     duration: f64,
     preview: PreviewRange,
+    preview_to_track_end: bool,
     qualities: Vec<Quality>,
 }
 
 impl MediaView {
     fn new(draft: &Draft, thumbnail: String) -> Self {
         let metadata = &draft.metadata;
+        let chorus = draft.chorus_preview();
         Self {
             id: draft.id.clone(),
             platform: draft.platform(),
@@ -176,7 +200,8 @@ impl MediaView {
             cover: cover_data(&draft.cover),
             thumbnail,
             duration: metadata.duration,
-            preview: draft.preview(),
+            preview: chorus.unwrap_or_else(|| PreviewRange::full(metadata.duration)),
+            preview_to_track_end: chorus.is_none(),
             qualities: metadata.qualities.clone(),
         }
     }
@@ -201,9 +226,9 @@ pub async fn resolve_media(
     } else {
         remote_cover(&state, &metadata).await.ok()
     };
-    let (cover, thumbnail) = if let Some(cover) = remote {
+    let (cover_source, cover, thumbnail) = if let Some((source, cover)) = remote {
         let thumbnail = cover_thumbnail(&cover)?;
-        (cover, thumbnail)
+        (source, cover, thumbnail)
     } else if let Some(entry) = saved {
         let thumbnail = entry.draft.cover;
         let bytes = thumbnail
@@ -211,16 +236,20 @@ pub async fn resolve_media(
             .filter(|value| value.len() <= 128 * 1024)
             .and_then(|value| STANDARD.decode(value).ok())
             .ok_or("历史封面无效")?;
-        (crop_background(bytes).await?, thumbnail)
+        let (source, cover) = prepare_cover(bytes).await?;
+        (source, cover, thumbnail)
     } else {
-        let cover = crop_background(DEFAULT_COVER.to_vec()).await?;
+        let (source, cover) = prepare_cover(DEFAULT_COVER.to_vec()).await?;
         let thumbnail = cover_thumbnail(&cover)?;
-        (cover, thumbnail)
+        (source, cover, thumbnail)
     };
     let next = Draft {
         id: Uuid::new_v4().to_string(),
         metadata,
         cover,
+        cover_source,
+        cover_region: None,
+        pending_cover: None,
         cached_file: None,
         lowest_file: None,
         preview_clip: None,
@@ -231,7 +260,7 @@ pub async fn resolve_media(
     Ok(view)
 }
 
-async fn remote_cover(state: &State, metadata: &Metadata) -> Result<Vec<u8>> {
+async fn remote_cover(state: &State, metadata: &Metadata) -> Result<(Arc<[u8]>, Vec<u8>)> {
     let url = platform::media_url(&metadata.cover_url)?;
     let response = state
         .client
@@ -256,7 +285,7 @@ async fn remote_cover(state: &State, metadata: &Metadata) -> Result<Vec<u8>> {
         }
         data.extend_from_slice(&chunk);
     }
-    crop_background(data).await
+    prepare_cover(data).await
 }
 
 #[derive(Serialize)]
@@ -265,40 +294,140 @@ pub struct CoverView {
     thumbnail: String,
 }
 
-#[tauri::command]
-pub async fn replace_cover(
-    id: String,
-    path: String,
-    state: tauri::State<'_, State>,
-) -> Result<CoverView> {
-    let mut guard = state.draft.lock().await;
-    let draft = find_draft(&mut guard, &id)?;
-    let path = Path::new(&path);
+#[derive(Clone, Copy, Deserialize, Serialize)]
+pub struct CoverRegion {
+    x: f64,
+    y: f64,
+    size: f64,
+}
+
+impl CoverRegion {
+    fn centered(width: u32, height: u32) -> Self {
+        let side = width.min(height);
+        Self {
+            x: f64::from((width - side) / 2) / f64::from(side),
+            y: f64::from((height - side) / 2) / f64::from(side),
+            size: 1.0,
+        }
+    }
+
+    fn square(self, width: u32, height: u32) -> Result<(u32, u32, u32)> {
+        if !self.x.is_finite() || !self.y.is_finite() || !(0.0 < self.size && self.size <= 1.0) {
+            return Err("请选择有效的裁切区域".into());
+        }
+        let short = width.min(height);
+        let pixels = |value: f64| (value * f64::from(short)).round() as u32;
+        let side = pixels(self.size).clamp(1, short);
+        Ok((
+            pixels(self.x).min(width - side),
+            pixels(self.y).min(height - side),
+            side,
+        ))
+    }
+}
+
+#[derive(Serialize)]
+pub struct CoverCropView {
+    src: String,
+    width: u32,
+    height: u32,
+    region: CoverRegion,
+}
+
+async fn read_cover_file(path: &Path) -> Result<Arc<[u8]>> {
+    use tokio::io::AsyncReadExt;
     if !tokio::fs::metadata(path)
         .await
         .is_ok_and(|file| file.is_file() && file.len() <= COVER_LIMIT)
     {
         return Err("请选择不超过 20 MB 的 JPG、PNG 或 WebP 图片".into());
     }
-    let bytes = tokio::fs::read(path)
+    let mut bytes = Vec::new();
+    tokio::fs::File::open(path)
+        .await
+        .map_err(|e| issue("无法读取封面", e))?
+        .take(COVER_LIMIT + 1)
+        .read_to_end(&mut bytes)
         .await
         .map_err(|e| issue("无法读取封面", e))?;
-    let cover = crop_background(bytes).await?;
+    if bytes.len() as u64 > COVER_LIMIT {
+        return Err("封面超过 20 MB".into());
+    }
+    Ok(bytes.into())
+}
+
+#[tauri::command]
+pub async fn prepare_cover_crop(
+    id: String,
+    path: Option<String>,
+    state: tauri::State<'_, State>,
+) -> Result<CoverCropView> {
+    let mut guard = state.draft.lock().await;
+    let draft = find_draft(&mut guard, &id)?;
+    let (source, region) = match path {
+        Some(path) => (read_cover_file(Path::new(&path)).await?, None),
+        None => (draft.cover_source.clone(), draft.cover_region),
+    };
+    let preview_source = source.clone();
+    let view = tauri::async_runtime::spawn_blocking(move || {
+        let image = decode_cover(&preview_source)?;
+        let (width, height) = (image.width(), image.height());
+        let preview = image
+            .resize(1200, 1200, image::imageops::FilterType::Triangle)
+            .to_rgb8();
+        Ok::<_, String>(CoverCropView {
+            src: cover_data(&encode_cover_jpeg(&preview, 88)?),
+            width,
+            height,
+            region: region.unwrap_or_else(|| CoverRegion::centered(width, height)),
+        })
+    })
+    .await
+    .map_err(|_| "无法准备封面裁切".to_owned())??;
+    draft.pending_cover = Some(source);
+    Ok(view)
+}
+
+#[tauri::command]
+pub async fn apply_cover_crop(
+    id: String,
+    region: CoverRegion,
+    state: tauri::State<'_, State>,
+) -> Result<CoverView> {
+    let mut guard = state.draft.lock().await;
+    let draft = find_draft(&mut guard, &id)?;
+    let source = draft.pending_cover.clone().ok_or("请重新打开裁切工具")?;
+    let cover = crop_background(source.clone(), Some(region)).await?;
     let thumbnail = cover_thumbnail(&cover)?;
     draft.cover = cover;
+    draft.cover_source = source;
+    draft.cover_region = Some(region);
+    draft.pending_cover = None;
     Ok(CoverView {
         cover: cover_data(&draft.cover),
         thumbnail,
     })
 }
 
-async fn crop_background(bytes: Vec<u8>) -> Result<Vec<u8>> {
-    tauri::async_runtime::spawn_blocking(move || crop_cover(&bytes))
+#[tauri::command]
+pub async fn discard_cover_crop(id: String, state: tauri::State<'_, State>) -> Result<()> {
+    find_draft(&mut *state.draft.lock().await, &id)?.pending_cover = None;
+    Ok(())
+}
+
+async fn prepare_cover(bytes: Vec<u8>) -> Result<(Arc<[u8]>, Vec<u8>)> {
+    let source: Arc<[u8]> = bytes.into();
+    let cover = crop_background(source.clone(), None).await?;
+    Ok((source, cover))
+}
+
+async fn crop_background(source: Arc<[u8]>, region: Option<CoverRegion>) -> Result<Vec<u8>> {
+    tauri::async_runtime::spawn_blocking(move || crop_cover(&source, region))
         .await
         .map_err(|_| "无法处理封面".to_owned())?
 }
 
-fn crop_cover(bytes: &[u8]) -> Result<Vec<u8>> {
+fn decode_cover(bytes: &[u8]) -> Result<image::DynamicImage> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| issue("无法识别图片", e))?;
@@ -307,29 +436,35 @@ fn crop_cover(bytes: &[u8]) -> Result<Vec<u8>> {
     limits.max_image_height = Some(10000);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    let mut image = reader
+    reader
         .decode()
-        .map_err(|_| "无法读取图片，请选择 JPG、PNG 或 WebP 封面")?;
-    let side = image.width().min(image.height());
-    let cropped = image.crop(
-        (image.width() - side) / 2,
-        (image.height() - side) / 2,
-        side,
-        side,
-    );
+        .map_err(|_| "无法读取图片，请选择 JPG、PNG 或 WebP 封面".into())
+}
+
+fn crop_cover(bytes: &[u8], region: Option<CoverRegion>) -> Result<Vec<u8>> {
+    let image = decode_cover(bytes)?;
+    let (width, height) = (image.width(), image.height());
+    let region = region.unwrap_or_else(|| CoverRegion::centered(width, height));
+    let (x, y, side) = region.square(width, height)?;
+    let cropped = image.crop_imm(x, y, side, side);
     for size in [1024, 896, 768, 640, 513] {
         let square = cropped
             .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
             .to_rgb8();
-        let mut jpg = Vec::new();
-        JpegEncoder::new_with_quality(&mut jpg, 100)
-            .encode_image(&square)
-            .map_err(|e| issue("无法生成 JPG 封面", e))?;
+        let jpg = encode_cover_jpeg(&square, 100)?;
         if jpg.len() <= COVER_BYTES {
             return Ok(jpg);
         }
     }
     Err("无法生成不超过 1.5 MB 的 JPG 封面".into())
+}
+
+fn encode_cover_jpeg(image: &image::RgbImage, quality: u8) -> Result<Vec<u8>> {
+    let mut jpg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpg, quality)
+        .encode_image(image)
+        .map_err(|e| issue("无法生成 JPG 封面", e))?;
+    Ok(jpg)
 }
 
 fn cover_data(bytes: &[u8]) -> String {
@@ -341,11 +476,7 @@ fn cover_thumbnail(cover: &[u8]) -> Result<String> {
         .map_err(|e| issue("无法读取封面", e))?
         .resize_exact(128, 128, image::imageops::FilterType::Lanczos3)
         .to_rgb8();
-    let mut jpg = Vec::new();
-    JpegEncoder::new_with_quality(&mut jpg, 88)
-        .encode_image(&image)
-        .map_err(|e| issue("无法生成历史封面", e))?;
-    Ok(cover_data(&jpg))
+    Ok(cover_data(&encode_cover_jpeg(&image, 88)?))
 }
 
 fn find_draft<'a>(guard: &'a mut Option<Draft>, id: &str) -> Result<&'a mut Draft> {
@@ -486,6 +617,8 @@ pub struct ExportRequest {
     version: MapVersion,
     preview: Option<PreviewRange>,
     #[serde(default)]
+    preview_to_track_end: bool,
+    #[serde(default)]
     shift: f64,
     #[serde(default)]
     tail_seconds: f64,
@@ -504,7 +637,12 @@ pub async fn export_map(
         .ok_or("导出前请在设置中选择 Beat Saber 游戏目录")?;
     let mut guard = state.draft.lock().await;
     let draft = find_draft(&mut guard, &payload.id)?;
-    let preview = draft.selected_preview(payload.preview, payload.shift, payload.tail_seconds)?;
+    let preview = draft.selected_preview(
+        payload.preview,
+        payload.shift,
+        payload.tail_seconds,
+        payload.preview_to_track_end,
+    )?;
     emit_progress(&app, "export", "正在获取所选音轨");
     let input = audio_source(&state, draft, &payload.quality).await?;
     let mut source = probe_audio(&state, &input).await?;
@@ -816,7 +954,15 @@ fn write_map(
 ) -> Result<()> {
     let duration = samples as f64 / rate as f64;
     let end_beat = duration * data.bpm / 60.0;
-    let preview = preview.within(duration);
+    let preview = if data.preview_to_track_end {
+        PreviewRange {
+            end: duration,
+            ..preview
+        }
+    } else {
+        preview
+    }
+    .within(duration);
     let version = env!("CARGO_PKG_VERSION");
     let mapper = data.mapper.trim();
     let info = match data.version {
@@ -995,7 +1141,7 @@ mod tests {
 
     #[test]
     fn cover_exports_square_jpeg_within_limits() {
-        let cover = crop_cover(DEFAULT_COVER).unwrap();
+        let cover = crop_cover(DEFAULT_COVER, None).unwrap();
         assert!(cover.starts_with(&[0xff, 0xd8, 0xff]));
         assert!(cover.len() <= COVER_BYTES);
         let image = image::load_from_memory(&cover).unwrap();
@@ -1015,7 +1161,7 @@ mod tests {
         pixels
             .write_to(&mut input, image::ImageFormat::Png)
             .unwrap();
-        let cover = crop_cover(&input.into_inner()).unwrap();
+        let cover = crop_cover(&input.into_inner(), None).unwrap();
         assert!(cover.len() <= 1_500_000);
         let image = image::load_from_memory(&cover).unwrap();
         assert_eq!(image.width(), image.height());
@@ -1064,16 +1210,16 @@ mod tests {
     }
 
     #[test]
-    fn preview_uses_the_first_ten_seconds_or_the_entire_short_track() {
+    fn preview_defaults_to_the_entire_track() {
         assert_eq!(
-            PreviewRange::new(None, 60.0),
+            PreviewRange::full(60.0),
             PreviewRange {
                 start: 0.0,
-                end: 10.0
+                end: 60.0
             }
         );
         assert_eq!(
-            PreviewRange::new(None, 6.25),
+            PreviewRange::full(6.25),
             PreviewRange {
                 start: 0.0,
                 end: 6.25
@@ -1083,7 +1229,7 @@ mod tests {
 
     #[test]
     fn chorus_preview_is_clamped_to_the_available_audio() {
-        let preview = PreviewRange::new(Some(24.5), 30.0);
+        let preview = PreviewRange::chorus(24.5, 38.0, 30.0).unwrap();
         assert_eq!(
             preview,
             PreviewRange {
@@ -1092,7 +1238,7 @@ mod tests {
             }
         );
         assert_eq!(preview.within(29.0).length(), 4.5);
-        assert_eq!(preview.within(24.0), PreviewRange::new(None, 24.0));
+        assert_eq!(preview.within(24.0), PreviewRange::full(24.0));
     }
 
     #[test]
@@ -1135,6 +1281,7 @@ mod tests {
             bpm: 98.625,
             version: MapVersion::Legacy,
             preview: Some(preview),
+            preview_to_track_end: false,
             shift: 0.0,
             tail_seconds: 0.0,
         };

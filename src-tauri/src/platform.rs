@@ -49,7 +49,7 @@ pub struct Metadata {
     pub artist: String,
     pub cover_url: String,
     pub duration: f64,
-    pub chorus_start: Option<f64>,
+    pub chorus: Option<(f64, f64)>,
     pub qualities: Vec<Quality>,
     pub source: Source,
 }
@@ -199,14 +199,16 @@ async fn netease_metadata(state: &State, url: &Url, cookie: &str) -> Result<Meta
         artist,
         cover_url: string(&song["al"]["picUrl"]),
         duration: song["dt"].as_f64().unwrap_or_default() / 1000.0,
-        chorus_start: response.get(1).and_then(|reply| {
+        chorus: response.get(1).and_then(|reply| {
             let body = &reply["body"];
             let chorus = body["data"]
                 .as_array()
                 .or_else(|| body["chorus"].as_array())?;
-            chorus.first()?["startTime"]
-                .as_u64()
-                .map(|ms| ms as f64 / 1000.0)
+            chorus.iter().find_map(|segment| {
+                let start = segment["startTime"].as_u64()?;
+                let end = segment["endTime"].as_u64()?;
+                (end > start).then_some((start as f64 / 1000.0, end as f64 / 1000.0))
+            })
         }),
         qualities,
         source: Source::Netease(id),
@@ -295,7 +297,7 @@ async fn bili_metadata(state: &State, url: &Url, cookie: &str) -> Result<Metadat
             .and_then(|part| part["duration"].as_f64())
             .or_else(|| video["duration"].as_f64())
             .unwrap_or_default(),
-        chorus_start: None,
+        chorus: None,
         qualities: tracks.into_iter().map(|(quality, _)| quality).collect(),
         source: Source::Bilibili { query, cid },
     })
@@ -356,16 +358,11 @@ async fn bili_tracks(
         .clone();
     let mut tracks = Vec::new();
     let mut seen = BTreeSet::new();
-    for item in dash["audio"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .chain(
-            dash.get("flac")
-                .and_then(|flac| flac.get("audio"))
-                .filter(|audio| audio.is_object()),
-        )
-    {
+    for item in dash["audio"].as_array().into_iter().flatten().chain(
+        dash.get("flac")
+            .and_then(|flac| flac.get("audio"))
+            .filter(|audio| audio.is_object()),
+    ) {
         let Some(id) = item["id"].as_u64().filter(|&id| id != 30250) else {
             continue;
         };
@@ -488,7 +485,7 @@ async fn youtube_metadata(state: &State, url: &Url, cookie: &str) -> Result<Meta
         ),
         cover_url: string(&data["thumbnail"]),
         duration: data["duration"].as_f64().unwrap_or_default(),
-        chorus_start: None,
+        chorus: None,
         qualities,
         source: Source::Youtube(id),
     })

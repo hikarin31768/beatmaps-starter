@@ -30,6 +30,8 @@ pub struct HistoryForm {
     version: MapVersion,
     quality: String,
     preview: PreviewRange,
+    #[serde(default)]
+    preview_to_track_end: bool,
     preview_source: PreviewRange,
     shift: f64,
     alignment: String,

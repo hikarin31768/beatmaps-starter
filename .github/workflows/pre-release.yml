@@ -36,6 +36,10 @@ jobs:
               throw "Stable tag $tag must match tauri.conf.json version v$($config.version)."
             }
             $name = "Beatmaps Starter $tag"
+            $notes = "docs/releases/$tag.md"
+            if (Test-Path -LiteralPath $notes -PathType Leaf) {
+              "release_notes=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            }
           } else {
             $tag = "pre-$($env:ACTION_RUN_NUMBER)-$($env:ACTION_SHA)"
             $name = "Pre-release $($env:ACTION_SHA)"
@@ -92,6 +96,7 @@ jobs:
           tag_name: ${{ steps.channel.outputs.release_tag }}
           target_commitish: ${{ github.sha }}
           name: ${{ steps.channel.outputs.release_name }}
+          body_path: ${{ steps.channel.outputs.release_notes }}
           body: |
             Windows installer and signed updater package for Beatmaps Starter.
 

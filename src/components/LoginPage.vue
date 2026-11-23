@@ -182,7 +182,14 @@ function importCookies() {
         </div>
       </template>
       <div v-else-if="mode === 'cookies'" class="login-fields">
-        <p class="muted">在浏览器登录 YouTube 后，导入 Netscape 格式的 YouTube Cookie 文件。</p>
+        <ol class="youtube-login-guide muted">
+          <li>在 Chrome 或 Edge 安装
+            <button type="button" class="youtube-extension-link" :disabled="pending"
+              @click="run(() => invoke('open_youtube_cookie_extension'))">Get cookies.txt LOCALLY <ExternalLink :size="13" /></button>。
+          </li>
+          <li>在同一个浏览器登录 YouTube，停留在 YouTube 页面。打开扩展，选择 <strong>Netscape</strong>，点击 <strong>Export</strong> 导出当前网站的 Cookie。</li>
+          <li>回到这里点「导入 Cookie」，选择刚导出的 .txt 文件。</li>
+        </ol>
         <label class="field">账号名称（可选）<input v-model="youtubeLabel" maxlength="80" placeholder="用于识别账号" /></label>
         <div class="login-actions">
           <button type="button" class="button secondary" @click="run(() => invoke('open_youtube'))"><ExternalLink :size="16" /> 打开 YouTube</button>
@@ -226,3 +233,9 @@ function importCookies() {
     </dialog>
   </section>
 </template>
+
+<style scoped>
+.youtube-login-guide { display: grid; gap: 8px; margin: 0; padding-inline-start: 1.45em; line-height: 1.55; }
+.youtube-extension-link { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; color: var(--accent-text); background: transparent; text-decoration: underline; text-underline-offset: 2px; }
+.youtube-extension-link:hover { text-decoration-thickness: 2px; }
+</style>

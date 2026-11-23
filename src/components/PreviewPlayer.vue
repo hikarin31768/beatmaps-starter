@@ -11,8 +11,9 @@ const props = defineProps({
   disabled: Boolean,
   canPlay: Boolean,
   active: { type: Boolean, default: true },
+  endAtTrack: Boolean,
 })
-const emit = defineEmits(['load', 'update:range'])
+const emit = defineEmits(['load', 'duration', 'update:range'])
 const markers = { start: '预览入点', end: '预览出点' }
 const seconds = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 })
 const markersRail = ref(null)
@@ -148,7 +149,7 @@ function playFrom(player, time) {
 
 function endForPosition(time) {
   const end = Math.min(props.range.end, duration.value)
-  return !drag && props.range.start <= time && time < end ? end : null
+  return !drag && !props.endAtTrack && props.range.start <= time && time < end ? end : null
 }
 
 function toggle() {
@@ -176,7 +177,10 @@ function seek(time) {
 
 function startPlayback(event) {
   const player = event.target
-  if (Number.isFinite(player.duration) && player.duration > 0) decodedDuration.value = player.duration
+  if (Number.isFinite(player.duration) && player.duration > 0) {
+    decodedDuration.value = player.duration
+    emit('duration', player.duration)
+  }
   if (!props.active) {
     player.currentTime = Math.min(position.value, duration.value)
     return
@@ -218,7 +222,7 @@ function stopTracking() {
 
 <template>
   <div class="preview-player">
-    <h3 class="preview-heading">试听与谱面预览区间</h3>
+    <h3 class="preview-heading">谱面预览区间</h3>
     <div class="preview-transport">
       <div class="preview-buttons">
         <button class="button secondary preview-control" type="button" :disabled="!canSeek"
