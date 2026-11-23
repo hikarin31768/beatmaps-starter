@@ -16,7 +16,7 @@ const short = Math.min(props.image.width, props.image.height)
 const imageWidth = props.image.width / short
 const imageHeight = props.image.height / short
 const minSize = 1 / short
-const maxSize = computed(() => Math.min(1, imageWidth - crop.value.x, imageHeight - crop.value.y))
+const maxSize = computed(() => maximumSize(crop.value))
 const directions = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }
 let drag = null
 
@@ -44,8 +44,17 @@ function placeCrop(x, y, size = crop.value.size) {
   }
 }
 
-function resizeCrop(size) {
-  crop.value = { ...crop.value, size: Math.max(minSize, Math.min(maxSize.value, size)) }
+function maximumSize(frame, fromCenter = false) {
+  const { x, y, size } = frame
+  if (!fromCenter) return Math.min(1, imageWidth - x, imageHeight - y)
+  const margin = Math.min(x, y, imageWidth - x - size, imageHeight - y - size)
+  return Math.min(1, size + 2 * Math.max(0, margin))
+}
+
+function resizeCrop(size, frame = crop.value, fromCenter = false) {
+  const nextSize = Math.max(minSize, Math.min(maximumSize(frame, fromCenter), size))
+  const offset = fromCenter ? (frame.size - nextSize) / 2 : 0
+  placeCrop(frame.x + offset, frame.y + offset, nextSize)
 }
 
 function startDrag(event, mode = 'move') {
@@ -65,7 +74,7 @@ function startDrag(event, mode = 'move') {
   }
   drag = {
     mode, id: event.pointerId, x: event.clientX, y: event.clientY,
-    cropX: crop.value.x, cropY: crop.value.y, size: crop.value.size, scaleX, scaleY,
+    lastX: event.clientX, lastY: event.clientY, frame: crop.value, fromCenter: event.altKey, scaleX, scaleY,
   }
   const target = event.currentTarget
   target.focus({ preventScroll: true })
@@ -74,10 +83,22 @@ function startDrag(event, mode = 'move') {
 
 function moveDrag(event) {
   if (drag?.id !== event.pointerId || props.saving) return
+  if (drag.mode === 'resize' && drag.fromCenter !== event.altKey) {
+    drag.frame = crop.value
+    drag.x = drag.lastX
+    drag.y = drag.lastY
+    drag.fromCenter = event.altKey
+  }
   const dx = (event.clientX - drag.x) * drag.scaleX
   const dy = (event.clientY - drag.y) * drag.scaleY
-  if (drag.mode === 'resize') resizeCrop(drag.size + (dx + dy) / 2)
-  else placeCrop(drag.cropX + dx, drag.cropY + dy)
+  if (drag.mode === 'resize') {
+    const delta = (dx + dy) * (drag.fromCenter ? 1 : 0.5)
+    resizeCrop(drag.frame.size + delta, drag.frame, drag.fromCenter)
+  } else {
+    placeCrop(drag.frame.x + dx, drag.frame.y + dy)
+  }
+  drag.lastX = event.clientX
+  drag.lastY = event.clientY
 }
 
 function endDrag(event) {
@@ -120,7 +141,8 @@ function cancel() {
           @selectstart.prevent @dragstart.prevent>
           <img :src="image.src" alt="待裁切的封面原图" draggable="false" />
           <div class="cover-crop-frame" :style="frameStyle">
-            <button type="button" class="cover-crop-handle" role="slider" aria-label="调整裁切框大小" title="拖动调整裁切框大小"
+            <button type="button" class="cover-crop-handle" role="slider"
+              aria-label="调整裁切框大小" title="拖动缩放，按住 Alt 围绕中心缩放"
               :aria-valuemin="1" :aria-valuemax="Math.round(maxSize * short)" :aria-valuenow="Math.round(crop.size * short)"
               :disabled="saving || short === 1" @pointerdown.stop="startDrag($event, 'resize')" @keydown.stop="resizeWithKey"></button>
           </div>

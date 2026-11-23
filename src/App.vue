@@ -647,7 +647,7 @@ function cancelCoverCrop() {
 }
 
 function playPreview() {
-  run('preview', '正在准备试听', async () => {
+  run('preview', '', async () => {
     const { id, shift } = map
     const path = await invoke('preview_audio', { id, shift, tailSeconds: tailSeconds.value })
     preview.value = convertFileSrc(path)
@@ -822,7 +822,6 @@ async function openExport(path) {
               <PreviewPlayer :key="`${map.id}:${map.shift}:${tailSeconds}`" :range="map.preview" :track-duration="trackDuration"
                 :src="preview" :loading="busy === 'preview'" :disabled="!!busy" :can-play="!!map.quality" :active="resultVisible && !coverCrop"
                 :end-at-track="map.previewToTrackEnd" @duration="updateTrackDuration" @update:range="updatePreviewRange" @load="playPreview" />
-              <p v-if="busy === 'preview'" class="muted preview-status" role="status">{{ progress }}</p>
               <div class="audio-offset-row">
                 <div class="alignment-controls">
                   <span class="muted" aria-live="polite">音频前偏移

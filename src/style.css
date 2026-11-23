@@ -279,7 +279,7 @@ svg { flex: none; }
 .preview-marker-end::before { left: 0; }
 .preview-marker:not(:disabled):hover::before, .preview-marker:active::before { background: var(--accent-hover); }
 .preview-marker:active, .preview-marker:focus-visible { z-index: 1; }
-.preview-counter, .preview-status { font-size: 12px; font-variant-numeric: tabular-nums; }
+.preview-counter { font-size: 12px; font-variant-numeric: tabular-nums; }
 .preview-buttons { display: flex; flex: none; gap: 6px; }
 .preview-control { min-height: 36px; width: 38px; padding: 0; flex: none; }
 .preview-seek { appearance: none; display: block; height: 36px; min-height: 0; margin: 0; padding: 0; border: 0; background: transparent; }

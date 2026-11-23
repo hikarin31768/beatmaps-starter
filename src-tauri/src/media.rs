@@ -574,9 +574,7 @@ pub async fn preview_audio(
         }
     }
     let quality = draft.lowest_quality()?;
-    emit_progress(&app, "preview", "正在获取最低音质音轨");
     let path = audio_source(&state, draft, &quality).await?;
-    emit_progress(&app, "preview", "正在准备试听音轨");
     let clip = PreviewClip {
         dir: tempfile::Builder::new()
             .prefix("beatmaps-preview-")
